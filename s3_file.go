@@ -2,6 +2,7 @@
 package s3
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,9 +15,9 @@ import (
 
 	"github.com/spf13/afero"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 )
 
 // File represents a file in S3.
@@ -70,23 +71,23 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	// ListObjects treats leading slashes as part of the directory name
 	// It also needs a trailing slash to list contents of a directory.
 	name := strings.TrimPrefix(f.Name(), "/") // + "/"
-
+	
 	// For the root of the bucket, we need to remove any prefix
 	if name != "" && !strings.HasSuffix(name, "/") {
 		name += "/"
 	}
-	output, err := f.fs.s3API.ListObjectsV2(&s3.ListObjectsV2Input{
+	output, err := f.fs.s3API.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
 		ContinuationToken: f.readdirContinuationToken,
 		Bucket:            aws.String(f.fs.bucket),
 		Prefix:            aws.String(name),
 		Delimiter:         aws.String("/"),
-		MaxKeys:           aws.Int64(int64(n)),
+		MaxKeys:           aws.Int32(int32(n)),
 	})
 	if err != nil {
 		return nil, err
 	}
 	f.readdirContinuationToken = output.NextContinuationToken
-	if !(*output.IsTruncated) {
+	if output.IsTruncated != nil && !*output.IsTruncated {
 		f.readdirNotTruncated = true
 	}
 	var fis = make([]os.FileInfo, 0, len(output.CommonPrefixes)+len(output.Contents))
@@ -304,11 +305,8 @@ func (f *File) openWriteStream() error {
 	f.streamWriteCloseErr = make(chan error)
 	f.streamWrite = writer
 
-	uploader := s3manager.NewUploader(f.fs.session)
-	uploader.Concurrency = 1
-
 	go func() {
-		input := &s3manager.UploadInput{
+		input := &s3.PutObjectInput{
 			Bucket: aws.String(f.fs.bucket),
 			Key:    aws.String(f.name),
 			Body:   reader,
@@ -323,7 +321,8 @@ func (f *File) openWriteStream() error {
 			input.ContentType = aws.String(mime.TypeByExtension(filepath.Ext(f.name)))
 		}
 
-		_, err := uploader.Upload(input)
+		uploader := manager.NewUploader(f.fs.s3API)
+		_, err := uploader.Upload(context.Background(), input)
 
 		if err != nil {
 			f.streamWriteErr = err
@@ -344,10 +343,10 @@ func (f *File) openReadStream(startAt int64) error {
 	var streamRange *string
 
 	if startAt > 0 {
-		streamRange = aws.String(fmt.Sprintf("bytes=%d-%d", startAt, f.cachedInfo.Size()))
+		streamRange = aws.String(fmt.Sprintf("bytes=%d-", startAt))
 	}
 
-	resp, err := f.fs.s3API.GetObject(&s3.GetObjectInput{
+	resp, err := f.fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: aws.String(f.fs.bucket),
 		Key:    aws.String(f.name),
 		Range:  streamRange,
