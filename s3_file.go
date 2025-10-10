@@ -16,8 +16,8 @@ import (
 	"github.com/spf13/afero"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // File represents a file in S3.
@@ -71,7 +71,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	// ListObjects treats leading slashes as part of the directory name
 	// It also needs a trailing slash to list contents of a directory.
 	name := strings.TrimPrefix(f.Name(), "/") // + "/"
-	
+
 	// For the root of the bucket, we need to remove any prefix
 	if name != "" && !strings.HasSuffix(name, "/") {
 		name += "/"
@@ -81,7 +81,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		Bucket:            aws.String(f.fs.bucket),
 		Prefix:            aws.String(name),
 		Delimiter:         aws.String("/"),
-		MaxKeys:           aws.Int32(int32(n)),
+		MaxKeys:           aws.Int32(int32(n + 1)),
 	})
 	if err != nil {
 		return nil, err
@@ -101,6 +101,9 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		}
 
 		fis = append(fis, NewFileInfo(path.Base("/"+*fileObject.Key), false, *fileObject.Size, *fileObject.LastModified))
+	}
+	if len(fis) == n+1 {
+		return fis[:n], nil
 	}
 
 	return fis, nil
@@ -308,7 +311,7 @@ func (f *File) openWriteStream() error {
 	go func() {
 		input := &s3.PutObjectInput{
 			Bucket: aws.String(f.fs.bucket),
-			Key:    aws.String(f.name),
+			Key:    aws.String(cleanS3Key(f.name)),
 			Body:   reader,
 		}
 
@@ -348,7 +351,7 @@ func (f *File) openReadStream(startAt int64) error {
 
 	resp, err := f.fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: aws.String(f.fs.bucket),
-		Key:    aws.String(f.name),
+		Key:    aws.String(cleanS3Key(f.name)),
 		Range:  streamRange,
 	})
 	if err != nil {

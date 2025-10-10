@@ -69,7 +69,7 @@ func (fs Fs) Create(name string) (afero.File, error) {
 	{ // It's faster to trigger an explicit empty put object than opening a file for write, closing it and re-opening it
 		req := &s3.PutObjectInput{
 			Bucket: aws.String(fs.bucket),
-			Key:    aws.String(name),
+			Key:    aws.String(cleanS3Key(name)),
 			Body:   bytes.NewReader([]byte{}),
 		}
 
@@ -104,6 +104,7 @@ func (fs Fs) Create(name string) (afero.File, error) {
 // Mkdir makes a directory in S3.
 func (fs Fs) Mkdir(name string, perm os.FileMode) error {
 	file, err := fs.OpenFile(fmt.Sprintf("%s/", path.Clean(name)), os.O_CREATE, perm)
+	// file, err := fs.OpenFile(path.Clean(name), os.O_CREATE, perm)
 	if err == nil {
 		err = file.Close()
 	}
@@ -173,7 +174,7 @@ func (fs Fs) Remove(name string) error {
 func (fs Fs) forceRemove(name string) error {
 	_, err := fs.s3API.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(fs.bucket),
-		Key:    aws.String(name),
+		Key:    aws.String(cleanS3Key(name)),
 	})
 	return err
 }
@@ -198,8 +199,11 @@ func (fs *Fs) RemoveAll(name string) error {
 		}
 	}
 	// finally remove the "file" representing the directory
-	if err := fs.forceRemove(s3dir.Name() + "/"); err != nil {
-		return err
+	// But skip this for the root directory "/" as it doesn't have a corresponding object
+	if s3dir.Name() != "/" {
+		if err := fs.forceRemove(s3dir.Name() + "/"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -214,15 +218,15 @@ func (fs Fs) Rename(oldname, newname string) error {
 	}
 	_, err := fs.s3API.CopyObject(context.Background(), &s3.CopyObjectInput{
 		Bucket:     aws.String(fs.bucket),
-		CopySource: aws.String(fs.bucket + "/" + strings.TrimPrefix(oldname, "/")),
-		Key:        aws.String(newname),
+		CopySource: aws.String(fs.bucket + "/" + cleanS3Key(oldname)),
+		Key:        aws.String(cleanS3Key(newname)),
 	})
 	if err != nil {
 		return err
 	}
 	_, err = fs.s3API.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(fs.bucket),
-		Key:    aws.String(oldname),
+		Key:    aws.String(cleanS3Key(oldname)),
 	})
 	return err
 }
@@ -236,7 +240,7 @@ func (fs Fs) Stat(name string) (os.FileInfo, error) {
 	}
 	out, err := fs.s3API.HeadObject(context.Background(), &s3.HeadObjectInput{
 		Bucket: aws.String(fs.bucket),
-		Key:    aws.String(name),
+		Key:    aws.String(cleanS3Key(name)),
 	})
 	if err != nil {
 		var apiErr smithy.APIError
@@ -307,7 +311,7 @@ func (fs Fs) Chmod(name string, mode os.FileMode) error {
 
 	_, err := fs.s3API.PutObjectAcl(context.Background(), &s3.PutObjectAclInput{
 		Bucket: aws.String(fs.bucket),
-		Key:    aws.String(name),
+		Key:    aws.String(cleanS3Key(name)),
 		ACL:    types.ObjectCannedACL(acl),
 	})
 	return err
@@ -322,6 +326,25 @@ func (Fs) Chown(string, int, int) error {
 // which makes it a non-standard solution
 func (Fs) Chtimes(string, time.Time, time.Time) error {
 	return ErrNotSupported
+}
+
+// cleanS3Key removes the leading slash from the name to create a proper S3 key
+func cleanS3Key(name string) string {
+	// Remove leading slash(es)
+	for len(name) > 0 && name[0] == '/' {
+		name = name[1:]
+	}
+
+	// Handle the special case where the path is just "/" - return it as is
+	// but this should be very rare in normal operations. Most S3 operations don't
+	// work with an empty key, so we need to be careful
+	if name == "" {
+		// For the root directory, return a safe default or handle as needed
+		// In most cases, operations shouldn't reach here for root "/"
+		return "" // This will cause S3 operations to fail, which is safer than creating invalid objects
+	}
+
+	return name
 }
 
 // I couldn't find a way to make this code cleaner. It's basically a big copy-paste on two

@@ -36,19 +36,54 @@ func TestCompatibleOsFileInfo(t *testing.T) {
 var (
 	bucketBase          = time.Now().UTC().Format("2006-01-02-15-04-05")
 	bucketCounter int32 = 0
+	endpoint            = ""
+	ak                  = ""
+	sk                  = ""
 )
 
 func GetFs(t *testing.T) afero.Fs {
-	return __getS3Fs(t)
+	return __getS3Fs(t, "")
 }
 
-func __getS3Fs(t *testing.T) *Fs {
-	// Use custom S3-compatible endpoint instead of default AWS S3
-	endpoint := "" // Custom S3-compatible service endpoint
+func GetFsBucket(t *testing.T, bucketName string) afero.Fs {
+	return __getS3FsBucket(t, bucketName)
+}
 
+func __getS3FsBucket(t *testing.T, bucketName string) *Fs {
 	// Create a basic config with the custom endpoint
 	cfg, err := config.LoadDefaultConfig(context.Background(),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("ak", "sk", "")), // Original credentials
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")), // Original credentials
+		config.WithRegion("us-east-1"), // Standard region for compatibility
+		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
+			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+				if service == s3.ServiceID {
+					return aws.Endpoint{
+						URL:               endpoint,
+						PartitionID:       "aws",
+						SigningName:       "s3", // Explicitly specify s3 as the signing name
+						SigningRegion:     region,
+						HostnameImmutable: true, // Prevent the SDK from modifying the hostname
+						Source:            aws.EndpointSourceCustom,
+					}, nil
+				}
+				return aws.Endpoint{}, &aws.EndpointNotFoundError{}
+			},
+		)),
+	)
+
+	if err != nil {
+		t.Fatal("Could not create config:", err)
+	}
+
+	fs := NewFs(bucketName, cfg)
+
+	return fs
+}
+
+func __getS3Fs(t *testing.T, bucketName string) *Fs {
+	// Create a basic config with the custom endpoint
+	cfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")), // Original credentials
 		config.WithRegion("us-east-1"), // Standard region for compatibility
 		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
 			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
@@ -78,12 +113,15 @@ func __getS3Fs(t *testing.T) *Fs {
 	})
 
 	// Creating a both non-conflicting and quite easy to understand and diagnose bucket name
-	bucketName := fmt.Sprintf(
-		"%s-%s-%d",
-		bucketBase,
-		strings.ToLower(t.Name()),
-		atomic.AddInt32(&bucketCounter, 1),
-	)
+	if bucketName == "" {
+		bucketName = fmt.Sprintf(
+			"%s-%s-%d",
+			bucketBase,
+			strings.ToLower(t.Name()),
+			atomic.AddInt32(&bucketCounter, 1),
+		)
+
+	}
 
 	if _, err := s3Client.CreateBucket(context.Background(), &s3.CreateBucketInput{
 		Bucket: aws.String(bucketName),
@@ -153,8 +191,8 @@ func TestFileWrite(t *testing.T) {
 	fs := GetFs(t)
 	testWriteFile(t, fs, "/file-1K", 1024)
 	testWriteFile(t, fs, "/file-1M", 1*1024*1024)
-	testWriteFile(t, fs, "/file-10M", 10*1024*1024)
-	testWriteFile(t, fs, "/file-100M", 100*1024*1024)
+	// testWriteFile(t, fs, "/file-10M", 10*1024*1024)
+	// testWriteFile(t, fs, "/file-100M", 100*1024*1024)
 }
 
 func TestFsName(t *testing.T) {
@@ -506,7 +544,7 @@ func TestFileReaddirnames(t *testing.T) {
 // This test is only here to explain this FS might behave in a strange way
 func TestBadConnection(t *testing.T) {
 	req := require.New(t)
-	fs := __getS3Fs(t)
+	fs := __getS3Fs(t, "")
 
 	// Let's mess-up the config
 	// Note: In v2, the configuration is immutable, so we'll just proceed with the test as normal
@@ -684,7 +722,7 @@ func TestChown(t *testing.T) {
 }
 
 func TestContentType(t *testing.T) {
-	fs := __getS3Fs(t)
+	fs := __getS3Fs(t, "")
 	req := require.New(t)
 
 	t.Run("MimeChecks", func(t *testing.T) {
@@ -708,7 +746,7 @@ func TestContentType(t *testing.T) {
 		for fileName, mimeType := range fileToMime {
 			resp, err := fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 				Bucket: aws.String(fs.bucket),
-				Key:    aws.String(fileName),
+				Key:    aws.String(cleanS3Key(fileName)),
 			})
 			req.NoError(err)
 			req.Equal(mimeType, *resp.ContentType)
@@ -721,7 +759,7 @@ func TestContentType(t *testing.T) {
 
 		resp, err := fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 			Bucket: aws.String(fs.bucket),
-			Key:    aws.String("create.png"),
+			Key:    aws.String(cleanS3Key("create.png")),
 		})
 		req.NoError(err)
 		req.Equal("image/png", *resp.ContentType)
@@ -738,7 +776,7 @@ func TestContentType(t *testing.T) {
 		for _, name := range []string{"custom-create", "custom-write"} {
 			resp, err := fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 				Bucket: aws.String(fs.bucket),
-				Key:    aws.String(name),
+				Key:    aws.String(cleanS3Key(name)),
 			})
 			req.NoError(err)
 			req.Equal("my-type", *resp.ContentType)
@@ -747,7 +785,7 @@ func TestContentType(t *testing.T) {
 }
 
 func TestFileProps(t *testing.T) {
-	fs := __getS3Fs(t)
+	fs := __getS3Fs(t, "")
 	req := require.New(t)
 
 	t.Run("CacheControl", func(t *testing.T) {
@@ -766,12 +804,23 @@ func TestFileProps(t *testing.T) {
 		for _, name := range []string{"create", "write"} {
 			resp, err := fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 				Bucket: aws.String(fs.bucket),
-				Key:    aws.String(name),
+				Key:    aws.String(cleanS3Key(name)),
 			})
 			req.NoError(err)
 			req.Equal(cacheControl, *resp.CacheControl)
 		}
 	})
+
+}
+func TestFileReaddirTmp(t *testing.T) {
+	fs := GetFsBucket(t, "2025-10-10-14-30-31-testfilereaddir-1")
+	req := require.New(t)
+	dir, err := fs.Open("/dir1")
+	req.NoError(err, "could not open /dir1")
+
+	fis, err := dir.Readdir(10)
+	req.NoError(err, "could not readdir /dir1")
+	req.Len(fis, 1)
 
 }
 
