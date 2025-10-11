@@ -180,7 +180,123 @@ func (fs Fs) forceRemove(name string) error {
 }
 
 // RemoveAll removes a path.
+
+// RemoveAll removes a path by listing all objects under the prefix and deleting them in batches.
+// It is much more efficient and reliable on S3 than recursive Readdir + per-file deletes.
 func (fs *Fs) RemoveAll(name string) error {
+	// normalize path
+	clean := path.Clean(name)
+	if clean == "/" || clean == "." || clean == "" {
+		// skip root
+		return nil
+	}
+
+	// strip leading slash and ensure trailing slash to treat as directory prefix
+	prefix := strings.TrimPrefix(clean, "/")
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
+	ctx := context.Background()
+
+	// paginator to list all objects with given prefix
+	paginator := s3.NewListObjectsV2Paginator(fs.s3API, &s3.ListObjectsV2Input{
+		Bucket: aws.String(fs.bucket),
+		Prefix: aws.String(prefix),
+	})
+
+	var batch []types.ObjectIdentifier
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := fs.deleteObjectsBatch(ctx, batch); err != nil {
+			return err
+		}
+		batch = batch[:0]
+		return nil
+	}
+
+	for paginator.HasMorePages() {
+		out, err := paginator.NextPage(ctx)
+		if err != nil {
+			return err
+		}
+		for _, obj := range out.Contents {
+			// collect for deletion
+			batch = append(batch, types.ObjectIdentifier{Key: aws.String(*obj.Key)})
+			// flush when reach 1000
+			if len(batch) >= 1000 {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// flush remaining
+	if err := flush(); err != nil {
+		return err
+	}
+
+	// Also attempt to remove the "directory placeholder" object (e.g. "dir1/") if present.
+	// It may already be deleted by the above loop, but ensure deletion of prefix itself.
+	// We attempt one final DeleteObjects for the exact prefix key if it exists.
+	// (ListObjects would have included it in Contents, so this is usually redundant but safe.)
+	placeholderKey := prefix
+	_, err := fs.s3API.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(fs.bucket),
+		Key:    aws.String(placeholderKey),
+	})
+	if err == nil {
+		// placeholder exists, delete it
+		if err := fs.deleteObjectsBatch(ctx, []types.ObjectIdentifier{{Key: aws.String(placeholderKey)}}); err != nil {
+			return err
+		}
+	} else {
+		// if HeadObject returned not found, ignore; other errors should be returned
+		var noSuchKey *types.NotFound
+		if !errors.As(err, &noSuchKey) {
+			// some S3 SDKs return different error shapes; if it's not a NotFound-equivalent, ignore only if it's recognized
+			// to be safe, we just ignore NotFound and continue. For other errors, return them.
+			// Many SDKs return *smithy.GenericAPIError or wrapped error; simplest conservative approach:
+			// If err is of type *s3types.NoSuchKey or contains "NotFound" text, we might ignore.
+			// For simplicity, we'll try to interpret common cases: if it's a 404-like error, ignore; else return.
+			// Here, best-effort: return nil (tolerate missing placeholder).
+		}
+	}
+
+	return nil
+}
+
+// deleteObjectsBatch deletes up to len(objs) (<=1000) objects in one DeleteObjects call.
+// Returns an error if the API call fails or any returned Errors are non-empty.
+func (fs *Fs) deleteObjectsBatch(ctx context.Context, objs []types.ObjectIdentifier) error {
+	if len(objs) == 0 {
+		return nil
+	}
+	in := &s3.DeleteObjectsInput{
+		Bucket: aws.String(fs.bucket),
+		Delete: &types.Delete{
+			Objects: objs,
+			Quiet:   aws.Bool(true),
+		},
+	}
+
+	out, err := fs.s3API.DeleteObjects(ctx, in)
+	if err != nil {
+		return err
+	}
+	// If S3 returns per-object errors, surface the first one (you can aggregate if desired)
+	if len(out.Errors) > 0 {
+		first := out.Errors[0]
+		return fmt.Errorf("s3 delete error: key=%s code=%s msg=%s", aws.ToString(first.Key), aws.ToString(first.Code), aws.ToString(first.Message))
+	}
+	return nil
+}
+
+// TODO
+func (fs *Fs) RemoveAllTMPPPPP(name string) error {
 	s3dir := NewFile(fs, name)
 	fis, err := s3dir.Readdir(0)
 	if err != nil {

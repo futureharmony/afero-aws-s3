@@ -68,6 +68,127 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	if n <= 0 {
 		return f.ReaddirAll()
 	}
+
+	name := strings.TrimPrefix(f.Name(), "/")
+	if name != "" && !strings.HasSuffix(name, "/") {
+		name += "/"
+	}
+
+	process := func(output *s3.ListObjectsV2Output) []os.FileInfo {
+		var outFis []os.FileInfo
+		seen := make(map[string]bool)
+
+		for _, obj := range output.Contents {
+			key := *obj.Key
+
+			// 跳过目录自身占位对象
+			if key == name {
+				continue
+			}
+
+			// 识别“目录”
+			rel := strings.TrimPrefix(key, name)
+			if idx := strings.Index(rel, "/"); idx != -1 {
+				dir := rel[:idx]
+				if !seen[dir] {
+					seen[dir] = true
+					outFis = append(outFis, NewFileInfo(dir, true, 0, time.Unix(0, 0)))
+				}
+				continue
+			}
+
+			// 普通文件
+			outFis = append(outFis, NewFileInfo(path.Base(key), false, *obj.Size, *obj.LastModified))
+		}
+
+		return outFis
+	}
+
+	// 首次请求
+	output, err := f.fs.s3API.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
+		ContinuationToken: f.readdirContinuationToken,
+		Bucket:            aws.String(f.fs.bucket),
+		Prefix:            aws.String(name),
+		MaxKeys:           aws.Int32(int32(n)),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 更新分页元信息（以便后续 Readdir 调用延续）
+	f.readdirContinuationToken = output.NextContinuationToken
+	if output.IsTruncated != nil && !*output.IsTruncated {
+		f.readdirNotTruncated = true
+	}
+
+	fis := process(output)
+
+	// 如果这一页有实际数据，直接返回
+	if len(fis) > 0 {
+		return fis, nil
+	}
+
+	// 如果当前页全被过滤掉并且有 NextContinuationToken -> 继续翻页（递归）
+	if output.NextContinuationToken != nil {
+		f.readdirContinuationToken = output.NextContinuationToken
+		return f.Readdir(n)
+	}
+
+	// 关键 fallback：
+	// 当输出里只有占位对象（或被过滤掉），且 S3 没有返回 NextContinuationToken（IsTruncated==false）时，
+	// 仍然有可能占位对象之后存在实际对象（某些 S3/兼容实现或排序边界）。
+	// 这时尝试用 StartAfter=name 再请求一次，获取 name 之后的条目。
+	onlyPlaceholder := false
+	if len(output.Contents) > 0 {
+		onlyPlaceholder = true
+		for _, obj := range output.Contents {
+			if *obj.Key != name && !strings.HasSuffix(*obj.Key, "/") {
+				onlyPlaceholder = false
+				break
+			}
+		}
+	}
+	if onlyPlaceholder {
+		out2, err2 := f.fs.s3API.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
+			Bucket:     aws.String(f.fs.bucket),
+			Prefix:     aws.String(name),
+			StartAfter: aws.String(name),
+			MaxKeys:    aws.Int32(int32(n)),
+		})
+		if err2 != nil {
+			return nil, err2
+		}
+		// 更新分页元信息为第二次请求的结果
+		f.readdirContinuationToken = out2.NextContinuationToken
+		if out2.IsTruncated != nil && !*out2.IsTruncated {
+			f.readdirNotTruncated = true
+		}
+		fis = process(out2)
+		// 如果第二次请求仍为空但有 NextContinuationToken，继续翻页
+		if len(fis) == 0 && out2.NextContinuationToken != nil {
+			f.readdirContinuationToken = out2.NextContinuationToken
+			return f.Readdir(n)
+		}
+		if len(fis) == 0 {
+			// 真正没有更多内容
+			f.readdirNotTruncated = true
+			return nil, io.EOF
+		}
+		return fis, nil
+	}
+
+	// 否则确实没有更多可以返回的条目（符合 os.File.Readdir 行为）
+	f.readdirNotTruncated = true
+	return nil, io.EOF
+}
+
+func (f *File) ReaddirTMPPPPP(n int) ([]os.FileInfo, error) {
+	if f.readdirNotTruncated {
+		return nil, io.EOF
+	}
+	if n <= 0 {
+		return f.ReaddirAll()
+	}
 	// ListObjects treats leading slashes as part of the directory name
 	// It also needs a trailing slash to list contents of a directory.
 	name := strings.TrimPrefix(f.Name(), "/") // + "/"
@@ -80,8 +201,9 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		ContinuationToken: f.readdirContinuationToken,
 		Bucket:            aws.String(f.fs.bucket),
 		Prefix:            aws.String(name),
-		Delimiter:         aws.String("/"),
-		MaxKeys:           aws.Int32(int32(n + 1)),
+		// TODO 会导致无法读取/dir下的/dir/readme
+		// Delimiter:         aws.String("/"),
+		MaxKeys: aws.Int32(int32(n)),
 	})
 	if err != nil {
 		return nil, err
@@ -94,16 +216,25 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	for _, subfolder := range output.CommonPrefixes {
 		fis = append(fis, NewFileInfo(path.Base("/"+*subfolder.Prefix), true, 0, time.Unix(0, 0)))
 	}
+
 	for _, fileObject := range output.Contents {
-		if strings.HasSuffix(*fileObject.Key, "/") {
-			// S3 includes <name>/ in the Contents listing for <name>
+		key := *fileObject.Key
+		if key == name || strings.HasSuffix(key, "/") {
 			continue
 		}
-
-		fis = append(fis, NewFileInfo(path.Base("/"+*fileObject.Key), false, *fileObject.Size, *fileObject.LastModified))
+		fis = append(fis, NewFileInfo(path.Base("/"+key), false, *fileObject.Size, *fileObject.LastModified))
 	}
-	if len(fis) == n+1 {
-		return fis[:n], nil
+
+	// 👇 修复点
+	if len(fis) == 0 {
+		if output.IsTruncated != nil && *output.IsTruncated {
+			// 说明还有下一页，但本页全被过滤，继续翻页
+			f.readdirContinuationToken = output.NextContinuationToken
+			return f.Readdir(n)
+		}
+		// 已经读到末尾，返回空 slice 和 EOF（符合标准库行为）
+		f.readdirNotTruncated = true
+		return nil, io.EOF
 	}
 
 	return fis, nil
