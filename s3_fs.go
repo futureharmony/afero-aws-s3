@@ -184,6 +184,7 @@ func (fs Fs) forceRemove(name string) error {
 // RemoveAll removes a path by listing all objects under the prefix and deleting them in batches.
 // It is much more efficient and reliable on S3 than recursive Readdir + per-file deletes.
 func (fs *Fs) RemoveAll(name string) error {
+	ctx := context.Background()
 	// normalize path
 	clean := path.Clean(name)
 	if clean == "/" || clean == "." || clean == "" {
@@ -193,11 +194,24 @@ func (fs *Fs) RemoveAll(name string) error {
 
 	// strip leading slash and ensure trailing slash to treat as directory prefix
 	prefix := strings.TrimPrefix(clean, "/")
+
+	// 判断是否是“目录”删除
+	if !strings.HasSuffix(prefix, "/") {
+		// 先尝试删除单个对象
+		_, err := fs.s3API.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(fs.bucket),
+			Key:    aws.String(prefix),
+		})
+		if err == nil {
+			// 文件存在，直接删
+			return fs.deleteObjectsBatch(ctx, []types.ObjectIdentifier{{Key: aws.String(prefix)}})
+		}
+		// 如果不存在，则继续按目录逻辑处理
+	}
+
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-
-	ctx := context.Background()
 
 	// paginator to list all objects with given prefix
 	paginator := s3.NewListObjectsV2Paginator(fs.s3API, &s3.ListObjectsV2Input{
