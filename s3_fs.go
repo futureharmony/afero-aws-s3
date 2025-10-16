@@ -387,7 +387,12 @@ func (fs Fs) Stat(name string) (os.FileInfo, error) {
 		}
 	} else if strings.HasSuffix(name, "/") {
 		// user asked for a directory, but this is a file
-		return FileInfo{name: name}, nil
+		return FileInfo{
+			name:        name,
+			directory:   true,
+			modTime:     *out.LastModified,
+			sizeInBytes: 0,
+		}, nil
 		/*
 			return FileInfo{}, &os.PathError{
 				Op:   "stat",
