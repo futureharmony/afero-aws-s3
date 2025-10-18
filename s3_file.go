@@ -3,6 +3,7 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -65,7 +66,19 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		return nil, io.EOF
 	}
 	if n <= 0 {
-		n = 1000
+		var fileInfos []os.FileInfo
+		for {
+			infos, err := f.Readdir(100)
+			fileInfos = append(fileInfos, infos...)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				} else {
+					return nil, err
+				}
+			}
+		}
+		return fileInfos, nil
 	}
 
 	name := strings.TrimPrefix(f.Name(), "/")
@@ -76,6 +89,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	process := func(output *s3.ListObjectsV2Output) []os.FileInfo {
 		var outFis []os.FileInfo
 		seen := make(map[string]bool)
+		dirModTime := make(map[string]time.Time) // Track the latest mod time for each directory
 
 		for _, obj := range output.Contents {
 			key := *obj.Key
@@ -89,15 +103,38 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 			rel := strings.TrimPrefix(key, name)
 			if idx := strings.Index(rel, "/"); idx != -1 {
 				dir := rel[:idx]
+
+				// Update the directory's modification time if this file is more recent
+				if modTime, exists := dirModTime[dir]; !exists || obj.LastModified.After(modTime) {
+					dirModTime[dir] = *obj.LastModified
+				}
+
 				if !seen[dir] {
 					seen[dir] = true
-					outFis = append(outFis, NewFileInfo(dir, true, 0, time.Unix(0, 0)))
+					// Use the latest modification time for this directory
+					latestModTime, hasModTime := dirModTime[dir]
+					if !hasModTime {
+						latestModTime = time.Unix(0, 0) // fallback
+					}
+					outFis = append(outFis, NewFileInfo(dir, true, 0, latestModTime))
 				}
 				continue
 			}
 
 			// 普通文件
 			outFis = append(outFis, NewFileInfo(path.Base(key), false, *obj.Size, *obj.LastModified))
+
+			// Check if this file is in a subdirectory and update that directory's mod time
+			relFile := strings.TrimPrefix(key, name)
+			if strings.Contains(relFile, "/") {
+				parts := strings.Split(relFile, "/")
+				if len(parts) >= 2 {
+					parentDir := parts[0]
+					if modTime, exists := dirModTime[parentDir]; !exists || obj.LastModified.After(modTime) {
+						dirModTime[parentDir] = *obj.LastModified
+					}
+				}
+			}
 		}
 
 		return outFis
