@@ -366,7 +366,9 @@ func (fs Fs) Rename(oldname, newname string) error {
 func (fs Fs) Stat(name string) (os.FileInfo, error) {
 	if name == "/" || name == "" {
 		// The root always exists
-		return NewFileInfo("/", true, 0, time.Unix(0, 0)), nil
+		// return NewFileInfo("/", true, 0, time.Unix(0, 0)), nil
+		statDir, errStat := fs.statDirectory(name)
+		return statDir, errStat
 	}
 	out, err := fs.s3API.HeadObject(context.Background(), &s3.HeadObjectInput{
 		Bucket: aws.String(fs.bucket),
@@ -387,12 +389,15 @@ func (fs Fs) Stat(name string) (os.FileInfo, error) {
 		}
 	} else if strings.HasSuffix(name, "/") {
 		// user asked for a directory, but this is a file
-		return FileInfo{
-			name:        name,
-			directory:   true,
-			modTime:     *out.LastModified,
-			sizeInBytes: 0,
-		}, nil
+		statDir, errStat := fs.statDirectory(name)
+		return statDir, errStat
+
+		// return FileInfo{
+		// 	name:        name,
+		// 	directory:   true,
+		// 	modTime:     *out.LastModified,
+		// 	sizeInBytes: 0,
+		// }, nil
 		/*
 			return FileInfo{}, &os.PathError{
 				Op:   "stat",
@@ -406,9 +411,36 @@ func (fs Fs) Stat(name string) (os.FileInfo, error) {
 
 func (fs Fs) statDirectory(name string) (os.FileInfo, error) {
 	nameClean := path.Clean(name)
+	prefix := strings.TrimPrefix(nameClean, "/")
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
+	// Calculate total size of all objects under this prefix
+	var totalSize int64
+	paginator := s3.NewListObjectsV2Paginator(fs.s3API, &s3.ListObjectsV2Input{
+		Bucket: aws.String(fs.bucket),
+		Prefix: aws.String(prefix),
+	})
+
+	for paginator.HasMorePages() {
+		out, err := paginator.NextPage(context.Background())
+		if err != nil {
+			return FileInfo{}, &os.PathError{
+				Op:   "stat",
+				Path: name,
+				Err:  err,
+			}
+		}
+		for _, obj := range out.Contents {
+			totalSize += *obj.Size
+		}
+	}
+
+	// Check if there are any objects under this prefix to determine if directory exists
 	out, err := fs.s3API.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
 		Bucket:  aws.String(fs.bucket),
-		Prefix:  aws.String(strings.TrimPrefix(nameClean, "/")),
+		Prefix:  aws.String(prefix),
 		MaxKeys: aws.Int32(1),
 	})
 	if err != nil {
@@ -425,7 +457,7 @@ func (fs Fs) statDirectory(name string) (os.FileInfo, error) {
 			Err:  os.ErrNotExist,
 		}
 	}
-	return NewFileInfo(path.Base(name), true, 0, time.Unix(0, 0)), nil
+	return NewFileInfo(path.Base(name), true, totalSize, time.Unix(0, 0)), nil
 }
 
 // Chmod doesn't exists in S3 but could be implemented by analyzing ACLs
