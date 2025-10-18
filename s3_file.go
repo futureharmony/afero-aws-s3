@@ -3,7 +3,6 @@ package s3
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -66,7 +65,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		return nil, io.EOF
 	}
 	if n <= 0 {
-		return f.ReaddirAll()
+		n = 1000
 	}
 
 	name := strings.TrimPrefix(f.Name(), "/")
@@ -180,81 +179,6 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	// 否则确实没有更多可以返回的条目（符合 os.File.Readdir 行为）
 	f.readdirNotTruncated = true
 	return nil, io.EOF
-}
-
-func (f *File) ReaddirTMPPPPP(n int) ([]os.FileInfo, error) {
-	if f.readdirNotTruncated {
-		return nil, io.EOF
-	}
-	if n <= 0 {
-		return f.ReaddirAll()
-	}
-	// ListObjects treats leading slashes as part of the directory name
-	// It also needs a trailing slash to list contents of a directory.
-	name := strings.TrimPrefix(f.Name(), "/") // + "/"
-
-	// For the root of the bucket, we need to remove any prefix
-	if name != "" && !strings.HasSuffix(name, "/") {
-		name += "/"
-	}
-	output, err := f.fs.s3API.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
-		ContinuationToken: f.readdirContinuationToken,
-		Bucket:            aws.String(f.fs.bucket),
-		Prefix:            aws.String(name),
-		// TODO 会导致无法读取/dir下的/dir/readme
-		// Delimiter:         aws.String("/"),
-		MaxKeys: aws.Int32(int32(n)),
-	})
-	if err != nil {
-		return nil, err
-	}
-	f.readdirContinuationToken = output.NextContinuationToken
-	if output.IsTruncated != nil && !*output.IsTruncated {
-		f.readdirNotTruncated = true
-	}
-	var fis = make([]os.FileInfo, 0, len(output.CommonPrefixes)+len(output.Contents))
-	for _, subfolder := range output.CommonPrefixes {
-		fis = append(fis, NewFileInfo(path.Base("/"+*subfolder.Prefix), true, 0, time.Unix(0, 0)))
-	}
-
-	for _, fileObject := range output.Contents {
-		key := *fileObject.Key
-		if key == name || strings.HasSuffix(key, "/") {
-			continue
-		}
-		fis = append(fis, NewFileInfo(path.Base("/"+key), false, *fileObject.Size, *fileObject.LastModified))
-	}
-
-	// 👇 修复点
-	if len(fis) == 0 {
-		if output.IsTruncated != nil && *output.IsTruncated {
-			// 说明还有下一页，但本页全被过滤，继续翻页
-			f.readdirContinuationToken = output.NextContinuationToken
-			return f.Readdir(n)
-		}
-		// 已经读到末尾，返回空 slice 和 EOF（符合标准库行为）
-		f.readdirNotTruncated = true
-		return nil, io.EOF
-	}
-
-	return fis, nil
-}
-
-// ReaddirAll provides list of file cachedInfo.
-func (f *File) ReaddirAll() ([]os.FileInfo, error) {
-	var fileInfos []os.FileInfo
-	for {
-		infos, err := f.Readdir(100)
-		fileInfos = append(fileInfos, infos...)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			} else {
-				return nil, err
-			}
-		}
-	}
-	return fileInfos, nil
 }
 
 // Readdirnames reads and returns a slice of names from the directory f.
