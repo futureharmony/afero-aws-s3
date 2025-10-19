@@ -66,6 +66,8 @@ func (Fs) Name() string { return "s3" }
 
 // Create a file.
 func (fs Fs) Create(name string) (afero.File, error) {
+	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
+	name = normalizeName(name)
 	{ // It's faster to trigger an explicit empty put object than opening a file for write, closing it and re-opening it
 		req := &s3.PutObjectInput{
 			Bucket: aws.String(fs.bucket),
@@ -103,7 +105,9 @@ func (fs Fs) Create(name string) (afero.File, error) {
 
 // Mkdir makes a directory in S3.
 func (fs Fs) Mkdir(name string, perm os.FileMode) error {
-	file, err := fs.OpenFile(fmt.Sprintf("%s/", path.Clean(name)), os.O_CREATE, perm)
+	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
+	name = normalizeName(name)
+	file, err := fs.OpenFile(fmt.Sprintf("%s/", normalizeName(name)), os.O_CREATE, perm)
 	// file, err := fs.OpenFile(path.Clean(name), os.O_CREATE, perm)
 	if err == nil {
 		err = file.Close()
@@ -123,6 +127,8 @@ func (fs *Fs) Open(name string) (afero.File, error) {
 
 // OpenFile opens a file.
 func (fs *Fs) OpenFile(name string, flag int, _ os.FileMode) (afero.File, error) {
+	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
+	name = normalizeName(name)
 	file := NewFile(fs, name)
 
 	// Reading and writing is technically supported but can't lead to anything that makes sense
@@ -164,6 +170,8 @@ func (fs *Fs) OpenFile(name string, flag int, _ os.FileMode) (afero.File, error)
 
 // Remove a file
 func (fs Fs) Remove(name string) error {
+	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
+	name = normalizeName(name)
 	if _, err := fs.Stat(name); err != nil {
 		return err
 	}
@@ -172,6 +180,8 @@ func (fs Fs) Remove(name string) error {
 
 // forceRemove doesn't error if a file does not exist.
 func (fs Fs) forceRemove(name string) error {
+	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
+	name = normalizeName(name)
 	_, err := fs.s3API.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(fs.bucket),
 		Key:    aws.String(cleanS3Key(name)),
@@ -185,8 +195,9 @@ func (fs Fs) forceRemove(name string) error {
 // It is much more efficient and reliable on S3 than recursive Readdir + per-file deletes.
 func (fs *Fs) RemoveAll(name string) error {
 	ctx := context.Background()
-	// normalize path
-	clean := path.Clean(name)
+	// normalize path first to handle cases like "\\U1单词卡片2(1).pdf"
+	name = normalizeName(name)
+	clean := name
 	if clean == "/" || clean == "." || clean == "" {
 		// skip root
 		return nil
@@ -343,6 +354,9 @@ func (fs *Fs) RemoveAllTMPPPPP(name string) error {
 // will copy the file to an object with the new name and then delete
 // the original.
 func (fs Fs) Rename(oldname, newname string) error {
+	// Normalize names first to handle cases like "\\U1单词卡片2(1).pdf"
+	oldname = normalizeName(oldname)
+	newname = normalizeName(newname)
 	if oldname == newname {
 		return nil
 	}
@@ -364,6 +378,8 @@ func (fs Fs) Rename(oldname, newname string) error {
 // Stat returns a FileInfo describing the named file.
 // If there is an error, it will be of type *os.PathError.
 func (fs Fs) Stat(name string) (os.FileInfo, error) {
+	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
+	name = normalizeName(name)
 	if name == "/" || name == "" {
 		// The root always exists
 		// return NewFileInfo("/", true, 0, time.Unix(0, 0)), nil
@@ -462,6 +478,8 @@ func (fs Fs) statDirectory(name string) (os.FileInfo, error) {
 
 // Chmod doesn't exists in S3 but could be implemented by analyzing ACLs
 func (fs Fs) Chmod(name string, mode os.FileMode) error {
+	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
+	name = normalizeName(name)
 	var acl string
 
 	otherRead := mode&(1<<2) != 0
@@ -542,4 +560,14 @@ func applyFileWriteProps(req *s3.PutObjectInput, p *UploadedFileProperties) {
 	if p.ContentType != nil {
 		req.ContentType = p.ContentType
 	}
+}
+
+// normalizeName normalizes file and directory names to handle special cases like "\\U1单词卡片2(1).pdf"
+func normalizeName(name string) string {
+	// First, clean the path to handle .. and . components
+	name = path.Clean(name)
+	// Convert any Windows-style backslashes to forward slashes (S3 standard)
+	name = filepath.ToSlash(name)
+	// Additional processing for special cases can be added here as needed
+	return name
 }
