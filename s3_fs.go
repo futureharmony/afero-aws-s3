@@ -564,10 +564,19 @@ func applyFileWriteProps(req *s3.PutObjectInput, p *UploadedFileProperties) {
 
 // normalizeName normalizes file and directory names to handle special cases like "\\U1单词卡片2(1).pdf"
 func normalizeName(name string) string {
+	// Check if the original name has a trailing slash to preserve
+	hasTrailingSlash := strings.HasSuffix(name, "/") || strings.HasSuffix(name, string(filepath.Separator))
+	
 	// First, clean the path to handle .. and . components
 	name = path.Clean(name)
 	// Convert any Windows-style backslashes to forward slashes (S3 standard)
 	name = filepath.ToSlash(name)
+	
+	// Restore trailing slash if it was present in the original name
+	if hasTrailingSlash && !strings.HasSuffix(name, "/") {
+		name += "/"
+	}
+	
 	// Additional processing for special cases can be added here as needed
 	return name
 }
