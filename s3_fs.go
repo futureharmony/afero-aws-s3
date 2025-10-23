@@ -107,7 +107,13 @@ func (fs Fs) Create(name string) (afero.File, error) {
 func (fs Fs) Mkdir(name string, perm os.FileMode) error {
 	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
 	name = normalizeName(name)
-	file, err := fs.OpenFile(fmt.Sprintf("%s/", normalizeName(name)), os.O_CREATE, perm)
+	
+	// Root directory "/" doesn't need to be created in S3 as it's virtual
+	if name == "/" || name == "." || name == "" {
+		return nil
+	}
+	
+	file, err := fs.OpenFile(fmt.Sprintf("%s/", name), os.O_CREATE, perm)
 	// file, err := fs.OpenFile(path.Clean(name), os.O_CREATE, perm)
 	if err == nil {
 		err = file.Close()
