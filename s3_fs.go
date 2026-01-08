@@ -64,6 +64,16 @@ var ErrInvalidSeek = errors.New("invalid seek offset")
 // Name returns the type of FS object this is: Fs.
 func (Fs) Name() string { return "s3" }
 
+// S3API returns the underlying S3 client.
+func (fs *Fs) S3API() *s3.Client {
+	return fs.s3API
+}
+
+// Bucket returns the S3 bucket name.
+func (fs *Fs) Bucket() string {
+	return fs.bucket
+}
+
 // Create a file.
 func (fs Fs) Create(name string) (afero.File, error) {
 	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
