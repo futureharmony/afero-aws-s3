@@ -36,14 +36,13 @@ type UploadedFileProperties struct {
 }
 
 // NewFs creates a new Fs object writing files to a given S3 bucket.
-func NewFs(bucket string, cfg aws.Config) *Fs {
+func NewFs(cfg aws.Config) *Fs {
 
 	s3Client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.UsePathStyle = true
 	})
 
 	return &Fs{
-		bucket: bucket,
 		config: cfg,
 		s3API:  s3Client,
 	}
@@ -69,9 +68,13 @@ func (fs *Fs) S3API() *s3.Client {
 	return fs.s3API
 }
 
-// Bucket returns the S3 bucket name.
-func (fs *Fs) Bucket() string {
+// GetBucket returns the S3 bucket name.
+func (fs *Fs) GetBucket() string {
 	return fs.bucket
+}
+
+func (fs *Fs) SetBucket(bucket string) {
+	fs.bucket = bucket
 }
 
 // ListBuckets returns a list of all S3 buckets.
