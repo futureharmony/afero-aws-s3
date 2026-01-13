@@ -74,6 +74,21 @@ func (fs *Fs) Bucket() string {
 	return fs.bucket
 }
 
+// ListBuckets returns a list of all S3 buckets.
+func (fs *Fs) ListBuckets() ([]string, error) {
+	listBucketsOutput, err := fs.s3API.ListBuckets(context.TODO(), &s3.ListBucketsInput{})
+	if err != nil {
+		return nil, err
+	}
+
+	buckets := make([]string, 0, len(listBucketsOutput.Buckets))
+	for _, bucket := range listBucketsOutput.Buckets {
+		buckets = append(buckets, *bucket.Name)
+	}
+
+	return buckets, nil
+}
+
 // Create a file.
 func (fs Fs) Create(name string) (afero.File, error) {
 	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
@@ -117,12 +132,12 @@ func (fs Fs) Create(name string) (afero.File, error) {
 func (fs Fs) Mkdir(name string, perm os.FileMode) error {
 	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
 	name = normalizeName(name)
-	
+
 	// Root directory "/" doesn't need to be created in S3 as it's virtual
 	if name == "/" || name == "." || name == "" {
 		return nil
 	}
-	
+
 	file, err := fs.OpenFile(fmt.Sprintf("%s/", name), os.O_CREATE, perm)
 	// file, err := fs.OpenFile(path.Clean(name), os.O_CREATE, perm)
 	if err == nil {
@@ -582,17 +597,17 @@ func applyFileWriteProps(req *s3.PutObjectInput, p *UploadedFileProperties) {
 func normalizeName(name string) string {
 	// Check if the original name has a trailing slash to preserve
 	hasTrailingSlash := strings.HasSuffix(name, "/") || strings.HasSuffix(name, string(filepath.Separator))
-	
+
 	// First, clean the path to handle .. and . components
 	name = path.Clean(name)
 	// Convert any Windows-style backslashes to forward slashes (S3 standard)
 	name = filepath.ToSlash(name)
-	
+
 	// Restore trailing slash if it was present in the original name
 	if hasTrailingSlash && !strings.HasSuffix(name, "/") {
 		name += "/"
 	}
-	
+
 	// Additional processing for special cases can be added here as needed
 	return name
 }
