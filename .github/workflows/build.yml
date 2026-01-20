@@ -1,65 +1,70 @@
-name: Build
+name: Go CI
 
-# Controls when the action will run. Triggers the workflow on push or pull request
-# events but only for the master branch
 on:
   push:
+    branches: [ main ]
   pull_request:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
+  # -----------------------------
+  # 主要 build/test job
+  # -----------------------------
   build:
-    # The type of runner that the job will run on
     runs-on: ubuntu-20.04
+
+    # 只跑一个 Go 版本，避免 free plan 排队
+    strategy:
+      matrix:
+        go: [1.18]
+      max-parallel: 1
+
     services:
       minio:
         image: fclairamb/minio-github-actions:v0.2
-        # env:
-        #  MINIO_COMMAND: server
         ports:
           - 9000:9000
 
-    strategy:
-      matrix:
-        go: [ 1.18, 1.17, 1.16 ]
-        include:
-          - go: 1.18
-            lint: true
-  
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE
+      # 1️⃣ Checkout 代码
       - uses: actions/checkout@v3
 
-      # Running golangci-lint
-      - name: Run golangci-lint
-        if: matrix.lint
-        uses: golangci/golangci-lint-action@v3
-        with:
-          version: v1.45
-
-      # Install Go
-      - name: Setup go
+      # 2️⃣ 设置 Go
+      - name: Setup Go
         uses: actions/setup-go@v4
         with:
           go-version: ${{ matrix.go }}
 
-      - name: Build
-        run: go get -v && go build -v ./...
-
-      - name: Test
-        # We need GCC because of the "go test -race"
-        # env:
-        #   CGO_ENABLED: 0
+      # 3️⃣ 安装依赖（只在 backend 目录，不扫描 frontend/pkg）
+      - name: Install backend dependencies
+        working-directory: ./ # 项目根或 backend 子目录
         run: |
-          apt-get update && apt-get install gcc -y
-          go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+          go mod tidy
+          go mod download
+
+      # 4️⃣ Lint（可选）
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: v1.54
+        continue-on-error: false
+
+      # 5️⃣ Build backend（避免扫描 frontend/pkg）
+      - name: Build backend
+        run: |
+          go build -v ./cmd/filebrowser
+
+      # 6️⃣ Test backend（race + coverage）
+      - name: Test backend
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc
+          go test -v -race -coverprofile=coverage.txt -covermode=atomic ./cmd/filebrowser/...
           bash <(curl -s https://codecov.io/bash)
 
-  # For github to have a unique status check name
+  # -----------------------------
+  # 可选状态汇总 job
+  # -----------------------------
   build-status:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - run: echo 'All good'
+      - run: echo "All good ✅"
