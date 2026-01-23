@@ -60,6 +60,13 @@ var ErrAlreadyOpened = errors.New("already opened")
 // ErrInvalidSeek is returned when the seek operation is not doable
 var ErrInvalidSeek = errors.New("invalid seek offset")
 
+// CompletedPart represents a completed part in multipart upload
+type CompletedPart struct {
+	PartNumber int32
+	ETag       string
+	Size       int64
+}
+
 // Name returns the type of FS object this is: Fs.
 func (Fs) Name() string { return "s3" }
 
@@ -613,4 +620,62 @@ func normalizeName(name string) string {
 
 	// Additional processing for special cases can be added here as needed
 	return name
+}
+
+// S3 multipart upload helper functions
+
+// InitiateMultipartUpload initiates a multipart upload for the given key
+func (fs *Fs) InitiateMultipartUpload(key string) (string, error) {
+	input := &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(fs.bucket),
+		Key:    aws.String(cleanS3Key(key)),
+	}
+
+	result, err := fs.s3API.CreateMultipartUpload(context.Background(), input)
+	if err != nil {
+		return "", err
+	}
+
+	return *result.UploadId, nil
+}
+
+// UploadPart uploads a part for the multipart upload
+func (fs *Fs) UploadPart(key, uploadID string, partNumber int32, data []byte) (string, error) {
+	input := &s3.UploadPartInput{
+		Bucket:     aws.String(fs.bucket),
+		Key:        aws.String(cleanS3Key(key)),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(partNumber),
+		Body:       bytes.NewReader(data),
+	}
+
+	result, err := fs.s3API.UploadPart(context.Background(), input)
+	if err != nil {
+		return "", err
+	}
+
+	return *result.ETag, nil
+}
+
+// CompleteMultipartUpload completes the multipart upload with the given parts
+func (fs *Fs) CompleteMultipartUpload(key, uploadID string, parts []CompletedPart) error {
+	completedParts := make([]types.CompletedPart, len(parts))
+	for i, part := range parts {
+		completedParts[i] = types.CompletedPart{
+			ETag:       aws.String(part.ETag),
+			PartNumber: aws.Int32(part.PartNumber),
+		}
+	}
+
+	input := &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(fs.bucket),
+		Key:      aws.String(cleanS3Key(key)),
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: completedParts,
+		},
+	}
+
+	_, err := fs.s3API.CompleteMultipartUpload(context.Background(), input)
+	return err
 }
