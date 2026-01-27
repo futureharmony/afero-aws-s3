@@ -25,6 +25,8 @@ import (
 type File struct {
 	fs                       *Fs            // Parent file system
 	name                     string         // Name of the file
+	bucket                   string         // S3 bucket name
+	rootPrefix               string         // Root prefix for the file
 	cachedInfo               os.FileInfo    // File info cached for later used
 	streamRead               io.ReadCloser  // streamRead is the underlying stream we are reading from
 	streamReadOffset         int64          // streamReadOffset is the offset of the read-only stream
@@ -41,6 +43,25 @@ func NewFile(fs *Fs, name string) *File {
 	return &File{
 		fs:   fs,
 		name: name,
+	}
+}
+
+// NewFileWithBucket initializes a File object with a specific bucket.
+func NewFileWithBucket(fs *Fs, name, bucket string) *File {
+	return &File{
+		fs:     fs,
+		name:   name,
+		bucket: bucket,
+	}
+}
+
+// NewFileWithBucketAndPrefix initializes a File object with a specific bucket and root prefix.
+func NewFileWithBucketAndPrefix(fs *Fs, name, bucket, rootPrefix string) *File {
+	return &File{
+		fs:         fs,
+		name:       name,
+		bucket:     bucket,
+		rootPrefix: rootPrefix,
 	}
 }
 
@@ -86,6 +107,11 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		name += "/"
 	}
 
+	// Apply RootPrefix to the directory lookup
+	prefixWithRoot := prependRootPrefix(name, f.rootPrefix)
+	// Ensure prefix doesn't start with / for S3
+	prefixWithRoot = strings.TrimPrefix(prefixWithRoot, "/")
+
 	process := func(output *s3.ListObjectsV2Output) []os.FileInfo {
 		var outFis []os.FileInfo
 		seen := make(map[string]bool)
@@ -95,12 +121,20 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 			key := *obj.Key
 
 			// 跳过目录自身占位对象
-			if key == name {
+			if key == prefixWithRoot {
+				continue
+			}
+
+			// Only process objects that start with our prefix
+			if !strings.HasPrefix(key, prefixWithRoot) {
 				continue
 			}
 
 			// 识别“目录”
-			rel := strings.TrimPrefix(key, name)
+			rel := strings.TrimPrefix(key, prefixWithRoot)
+			// If rel starts with /, trim it
+			rel = strings.TrimPrefix(rel, "/")
+
 			if idx := strings.Index(rel, "/"); idx != -1 {
 				dir := rel[:idx]
 
@@ -125,7 +159,8 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 			outFis = append(outFis, NewFileInfo(path.Base(key), false, *obj.Size, *obj.LastModified))
 
 			// Check if this file is in a subdirectory and update that directory's mod time
-			relFile := strings.TrimPrefix(key, name)
+			relFile := strings.TrimPrefix(key, prefixWithRoot)
+			relFile = strings.TrimPrefix(relFile, "/")
 			if strings.Contains(relFile, "/") {
 				parts := strings.Split(relFile, "/")
 				if len(parts) >= 2 {
@@ -143,8 +178,8 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	// 首次请求
 	output, err := f.fs.s3API.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
 		ContinuationToken: f.readdirContinuationToken,
-		Bucket:            aws.String(f.fs.bucket),
-		Prefix:            aws.String(name),
+		Bucket:            aws.String(f.bucket),
+		Prefix:            aws.String(prefixWithRoot),
 		MaxKeys:           aws.Int32(int32(n)),
 	})
 	if err != nil {
@@ -178,7 +213,8 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	if len(output.Contents) > 0 {
 		onlyPlaceholder = true
 		for _, obj := range output.Contents {
-			if *obj.Key != name && !strings.HasSuffix(*obj.Key, "/") {
+			// Check if the object key starts with the prefix and is not a directory placeholder
+			if strings.HasPrefix(*obj.Key, prefixWithRoot) && !strings.HasSuffix(*obj.Key, "/") {
 				onlyPlaceholder = false
 				break
 			}
@@ -186,9 +222,9 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	}
 	if onlyPlaceholder {
 		out2, err2 := f.fs.s3API.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
-			Bucket:     aws.String(f.fs.bucket),
-			Prefix:     aws.String(name),
-			StartAfter: aws.String(name),
+			Bucket:     aws.String(f.bucket),
+			Prefix:     aws.String(prefixWithRoot),
+			StartAfter: aws.String(prefixWithRoot),
 			MaxKeys:    aws.Int32(int32(n)),
 		})
 		if err2 != nil {
@@ -245,7 +281,7 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 // Stat returns the FileInfo structure describing file.
 // If there is an error, it will be of type *PathError.
 func (f *File) Stat() (os.FileInfo, error) {
-	info, err := f.fs.Stat(f.Name())
+	info, err := f.fs.Stat(f.Name(), f.bucket, f.rootPrefix)
 	if err == nil {
 		f.cachedInfo = info
 	}
@@ -402,7 +438,7 @@ func (f *File) openWriteStream() error {
 
 	go func() {
 		input := &s3.PutObjectInput{
-			Bucket: aws.String(f.fs.bucket),
+			Bucket: aws.String(f.bucket),
 			Key:    aws.String(cleanS3Key(f.name)),
 			Body:   reader,
 		}
@@ -442,7 +478,7 @@ func (f *File) openReadStream(startAt int64) error {
 	}
 
 	resp, err := f.fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
-		Bucket: aws.String(f.fs.bucket),
+		Bucket: aws.String(f.bucket),
 		Key:    aws.String(cleanS3Key(f.name)),
 		Range:  streamRange,
 	})
