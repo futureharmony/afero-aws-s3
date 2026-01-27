@@ -333,9 +333,9 @@ func (fs *Fs) RemoveAll(name, bucket, rootPrefix string) error {
 	// Apply RootPrefix to the directory lookup
 	prefixWithRoot := prependRootPrefix(clean, rootPrefix)
 	prefix := strings.TrimPrefix(prefixWithRoot, "/")
-	if prefix != "" && !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
+	// if prefix != "" && !strings.HasSuffix(prefix, "/") {
+	// 	prefix += "/"
+	// }
 
 	// 判断是否是“目录”删除
 	if !strings.HasSuffix(prefix, "/") {
