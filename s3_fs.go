@@ -835,7 +835,15 @@ func normalizeName(name string) string {
 	// Check if the original name has a trailing slash to preserve
 	hasTrailingSlash := strings.HasSuffix(name, "/") || strings.HasSuffix(name, string(filepath.Separator))
 
-	// First, clean the path to handle .. and . components
+	// TODO
+	// // First, decode any URL-encoded characters to handle spaces and special chars
+	// if strings.Contains(name, "%") {
+	// 	if decoded, err := url.QueryUnescape(name); err == nil {
+	// 		name = decoded
+	// 	}
+	// }
+
+	// Then, clean the path to handle .. and . components
 	name = path.Clean(name)
 	// Convert any Windows-style backslashes to forward slashes (S3 standard)
 	name = filepath.ToSlash(name)
