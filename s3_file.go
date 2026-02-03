@@ -1,4 +1,4 @@
-// Package s3 brings S3 files handling to afero
+// Package s3 implements an S3 filesystem using afero
 package s3
 
 import (
@@ -115,61 +115,39 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	process := func(output *s3.ListObjectsV2Output) []os.FileInfo {
 		var outFis []os.FileInfo
 		seen := make(map[string]bool)
-		dirModTime := make(map[string]time.Time) // Track the latest mod time for each directory
+		dirModTime := make(map[string]time.Time)
 
 		for _, obj := range output.Contents {
 			key := *obj.Key
 
-			// 跳过目录自身占位对象
-			if key == prefixWithRoot {
+			if key == prefixWithRoot || !strings.HasPrefix(key, prefixWithRoot) {
 				continue
 			}
 
-			// Only process objects that start with our prefix
-			if !strings.HasPrefix(key, prefixWithRoot) {
-				continue
-			}
-
-			// 识别“目录”
 			rel := strings.TrimPrefix(key, prefixWithRoot)
-			// If rel starts with /, trim it
-			rel = strings.TrimPrefix(rel, "/")
+			if len(rel) > 0 && rel[0] == '/' {
+				rel = rel[1:]
+			}
 
 			if idx := strings.Index(rel, "/"); idx != -1 {
 				dir := rel[:idx]
 
-				// Update the directory's modification time if this file is more recent
 				if modTime, exists := dirModTime[dir]; !exists || obj.LastModified.After(modTime) {
 					dirModTime[dir] = *obj.LastModified
 				}
 
 				if !seen[dir] {
 					seen[dir] = true
-					// Use the latest modification time for this directory
 					latestModTime, hasModTime := dirModTime[dir]
 					if !hasModTime {
-						latestModTime = time.Unix(0, 0) // fallback
+						latestModTime = time.Unix(0, 0)
 					}
 					outFis = append(outFis, NewFileInfo(dir, true, 0, latestModTime))
 				}
 				continue
 			}
 
-			// 普通文件
 			outFis = append(outFis, NewFileInfo(path.Base(key), false, *obj.Size, *obj.LastModified))
-
-			// Check if this file is in a subdirectory and update that directory's mod time
-			relFile := strings.TrimPrefix(key, prefixWithRoot)
-			relFile = strings.TrimPrefix(relFile, "/")
-			if strings.Contains(relFile, "/") {
-				parts := strings.Split(relFile, "/")
-				if len(parts) >= 2 {
-					parentDir := parts[0]
-					if modTime, exists := dirModTime[parentDir]; !exists || obj.LastModified.After(modTime) {
-						dirModTime[parentDir] = *obj.LastModified
-					}
-				}
-			}
 		}
 
 		return outFis
@@ -445,7 +423,7 @@ func (f *File) openWriteStream() error {
 		}
 
 		if f.fs.FileProps != nil {
-			applyFileWriteProps(input, f.fs.FileProps)
+			applyFileProps(input, f.fs.FileProps)
 		}
 
 		// If no Content-Type was specified, we'll guess one

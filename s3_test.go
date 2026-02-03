@@ -1,4 +1,4 @@
-// Package s3 brings S3 files handling to afero
+// Package s3 implements an S3 filesystem using afero
 package s3
 
 import (
@@ -25,7 +25,8 @@ import (
 )
 
 func TestCompatibleAferoS3(t *testing.T) {
-	var _ afero.Fs = (*Fs)(nil)
+	// Fs doesn't implement afero.Fs directly, FsWrapper does
+	var _ afero.Fs = (*FsWrapper)(nil)
 	var _ afero.File = (*File)(nil)
 }
 
@@ -49,7 +50,7 @@ func GetFsBucket(t *testing.T, bucketName string) afero.Fs {
 	return __getS3FsBucket(t, bucketName)
 }
 
-func __getS3FsBucket(t *testing.T, bucketName string) *Fs {
+func __getS3FsBucket(t *testing.T, bucketName string) *FsWrapper {
 	// Create a basic config with the custom endpoint
 	cfg, err := config.LoadDefaultConfig(context.Background(),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")), // Original credentials
@@ -75,12 +76,10 @@ func __getS3FsBucket(t *testing.T, bucketName string) *Fs {
 		t.Fatal("Could not create config:", err)
 	}
 
-	fs := NewFs(bucketName, cfg)
-
-	return fs
+	return NewFsWrapper(cfg, bucketName, "")
 }
 
-func __getS3Fs(t *testing.T, bucketName string) *Fs {
+func __getS3Fs(t *testing.T, bucketName string) *FsWrapper {
 	// Create a basic config with the custom endpoint
 	cfg, err := config.LoadDefaultConfig(context.Background(),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")), // Original credentials
@@ -129,10 +128,10 @@ func __getS3Fs(t *testing.T, bucketName string) *Fs {
 		t.Fatal("Could not create bucket:", err)
 	}
 
-	fs := NewFs(bucketName, cfg)
+	fsWrapper := NewFsWrapper(cfg, bucketName, "")
 
 	t.Cleanup(func() {
-		if err := fs.RemoveAll("/"); err != nil {
+		if err := fsWrapper.RemoveAll("/"); err != nil {
 			t.Fatal("Could not cleanup bucket:", err)
 			return
 		}
@@ -144,7 +143,7 @@ func __getS3Fs(t *testing.T, bucketName string) *Fs {
 		// }
 	})
 
-	return fs
+	return fsWrapper
 }
 
 func testWriteFile(t *testing.T, fs afero.Fs, name string, size int) {
@@ -744,8 +743,8 @@ func TestContentType(t *testing.T) {
 
 		// And we check the resulting content-type
 		for fileName, mimeType := range fileToMime {
-			resp, err := fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
-				Bucket: aws.String(fs.bucket),
+			resp, err := fs.Fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
+				Bucket: aws.String(fs.Fs.bucket),
 				Key:    aws.String(cleanS3Key(fileName)),
 			})
 			req.NoError(err)
@@ -757,8 +756,8 @@ func TestContentType(t *testing.T) {
 		_, err := fs.Create("create.png")
 		req.NoError(err)
 
-		resp, err := fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
-			Bucket: aws.String(fs.bucket),
+		resp, err := fs.Fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
+			Bucket: aws.String(fs.Fs.bucket),
 			Key:    aws.String(cleanS3Key("create.png")),
 		})
 		req.NoError(err)
@@ -766,16 +765,16 @@ func TestContentType(t *testing.T) {
 	})
 
 	t.Run("Custom", func(t *testing.T) {
-		fs.FileProps = &UploadedFileProperties{ContentType: aws.String("my-type")}
-		defer func() { fs.FileProps = nil }()
+		fs.Fs.FileProps = &UploadedFileProperties{ContentType: aws.String("my-type")}
+		defer func() { fs.Fs.FileProps = nil }()
 		_, err := fs.Create("custom-create")
 		req.NoError(err)
 
 		testCreateFile(t, fs, "custom-write", "content")
 
 		for _, name := range []string{"custom-create", "custom-write"} {
-			resp, err := fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
-				Bucket: aws.String(fs.bucket),
+			resp, err := fs.Fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
+				Bucket: aws.String(fs.Fs.bucket),
 				Key:    aws.String(cleanS3Key(name)),
 			})
 			req.NoError(err)
@@ -790,9 +789,10 @@ func TestFileProps(t *testing.T) {
 
 	t.Run("CacheControl", func(t *testing.T) {
 		cacheControl := "Cache-Control: max-age=300, max-stale=120"
-		fs.FileProps = &UploadedFileProperties{
+		fs.Fs.FileProps = &UploadedFileProperties{
 			CacheControl: aws.String(cacheControl),
 		}
+		defer func() { fs.Fs.FileProps = nil }()
 
 		// We create a file
 		_, err := fs.Create("create")
@@ -802,8 +802,8 @@ func TestFileProps(t *testing.T) {
 		testCreateFile(t, fs, "write", "content")
 
 		for _, name := range []string{"create", "write"} {
-			resp, err := fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
-				Bucket: aws.String(fs.bucket),
+			resp, err := fs.Fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
+				Bucket: aws.String(fs.Fs.bucket),
 				Key:    aws.String(cleanS3Key(name)),
 			})
 			req.NoError(err)

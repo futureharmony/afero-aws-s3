@@ -1,4 +1,4 @@
-// Package s3 brings S3 files handling to afero
+// Package s3 implements an S3 filesystem using afero
 package s3
 
 import (
@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -20,11 +21,22 @@ import (
 	"github.com/spf13/afero"
 )
 
+// directoryCacheEntry holds cached directory information
+type directoryCacheEntry struct {
+	fileInfos []os.FileInfo
+	timestamp time.Time
+}
+
 // Fs is an FS object backed by S3.
 type Fs struct {
 	FileProps *UploadedFileProperties // FileProps define the file properties we want to set for all new files
 	config    aws.Config              // Config for the client
 	s3API     *s3.Client
+	bucket    string // bucket name for backward compatibility with tests
+
+	// Cache for directory listings to improve performance
+	dirCache      map[string]*directoryCacheEntry
+	dirCacheMutex sync.RWMutex
 }
 
 // UploadedFileProperties defines all the set properties applied to future files
@@ -35,20 +47,23 @@ type UploadedFileProperties struct {
 }
 
 // NewFs creates a new Fs object writing files to a given S3 bucket.
-func NewFs(cfg aws.Config) *Fs {
+// The bucket parameter is the S3 bucket name.
+func NewFs(bucket string, cfg aws.Config) *Fs {
 	s3Client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.UsePathStyle = true
 	})
 
 	return &Fs{
-		config: cfg,
-		s3API:  s3Client,
+		config:   cfg,
+		s3API:    s3Client,
+		bucket:   bucket,
+		dirCache: make(map[string]*directoryCacheEntry),
 	}
 }
 
 // NewFsWrapper creates a new FsWrapper object that implements afero.Fs with fixed bucket and rootPrefix.
 func NewFsWrapper(cfg aws.Config, bucket, rootPrefix string) *FsWrapper {
-	fs := NewFs(cfg)
+	fs := NewFs(bucket, cfg)
 	return &FsWrapper{
 		Fs:         fs,
 		Bucket:     bucket,
@@ -196,7 +211,7 @@ func (fs Fs) Create(name, bucket, rootPrefix string) (afero.File, error) {
 		}
 
 		if fs.FileProps != nil {
-			applyFileCreateProps(req, fs.FileProps)
+			applyFileProps(req, fs.FileProps)
 		}
 
 		// If no Content-Type was specified, we'll guess one
@@ -301,6 +316,14 @@ func (fs Fs) Remove(name, bucket, rootPrefix string) error {
 	if _, err := fs.Stat(name, bucket, rootPrefix); err != nil {
 		return err
 	}
+
+	// Invalidate cache for parent directory
+	parentDir := path.Dir(name)
+	if parentDir != "." && parentDir != "/" {
+		parentKey := prependRootPrefix(parentDir, rootPrefix)
+		fs.invalidateDirectoryCache(parentKey)
+	}
+
 	return fs.forceRemove(name, bucket, rootPrefix)
 }
 
@@ -316,8 +339,6 @@ func (fs Fs) forceRemove(name, bucket, rootPrefix string) error {
 	return err
 }
 
-// RemoveAll removes a path.
-
 // RemoveAll removes a path by listing all objects under the prefix and deleting them in batches.
 // It is much more efficient and reliable on S3 than recursive Readdir + per-file deletes.
 func (fs *Fs) RemoveAll(name, bucket, rootPrefix string) error {
@@ -328,6 +349,14 @@ func (fs *Fs) RemoveAll(name, bucket, rootPrefix string) error {
 	if clean == "/" || clean == "." || clean == "" {
 		// skip root
 		return nil
+	}
+
+	// Invalidate cache for this directory and parent
+	fs.invalidateDirectoryCache(name)
+	parentDir := path.Dir(name)
+	if parentDir != "." && parentDir != "/" {
+		parentKey := prependRootPrefix(parentDir, rootPrefix)
+		fs.invalidateDirectoryCache(parentKey)
 	}
 
 	// Apply RootPrefix to the directory lookup
@@ -459,6 +488,20 @@ func (fs Fs) Rename(oldname, newname, bucket, rootPrefix string) error {
 		return nil
 	}
 
+	// Invalidate cache for both old and new parent directories
+	oldParent := path.Dir(oldname)
+	newParent := path.Dir(newname)
+
+	if oldParent != "." && oldParent != "/" {
+		oldParentKey := prependRootPrefix(oldParent, rootPrefix)
+		fs.invalidateDirectoryCache(oldParentKey)
+	}
+
+	if newParent != "." && newParent != "/" && newParent != oldParent {
+		newParentKey := prependRootPrefix(newParent, rootPrefix)
+		fs.invalidateDirectoryCache(newParentKey)
+	}
+
 	oldKeyWithPrefix := prependRootPrefix(oldname, rootPrefix)
 	newKeyWithPrefix := prependRootPrefix(newname, rootPrefix)
 
@@ -538,33 +581,17 @@ func (fs Fs) statDirectory(name, bucket, rootPrefix string) (os.FileInfo, error)
 		prefix += "/"
 	}
 
-	// Calculate total size of all objects under this prefix
-	var totalSize int64
-	paginator := s3.NewListObjectsV2Paginator(fs.s3API, &s3.ListObjectsV2Input{
-		Bucket: aws.String(bucket),
-		Prefix: aws.String(prefix),
-	})
+	// For directory stat, we only need to check if it exists, not calculate total size
+	// This is much faster for directories with many objects
+	hasObjects := false
 
-	for paginator.HasMorePages() {
-		out, err := paginator.NextPage(context.Background())
-		if err != nil {
-			return FileInfo{}, &os.PathError{
-				Op:   "stat",
-				Path: name,
-				Err:  err,
-			}
-		}
-		for _, obj := range out.Contents {
-			totalSize += *obj.Size
-		}
-	}
-
-	// Check if there are any objects under this prefix to determine if directory exists
+	// Use ListObjectsV2 with MaxKeys=1 to quickly check if directory exists
 	out, err := fs.s3API.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
 		Bucket:  aws.String(bucket),
 		Prefix:  aws.String(prefix),
 		MaxKeys: aws.Int32(1),
 	})
+
 	if err != nil {
 		return FileInfo{}, &os.PathError{
 			Op:   "stat",
@@ -572,14 +599,21 @@ func (fs Fs) statDirectory(name, bucket, rootPrefix string) (os.FileInfo, error)
 			Err:  err,
 		}
 	}
-	if len(out.Contents) == 0 && (name != "" && name != "/") {
+
+	hasObjects = len(out.Contents) > 0
+
+	// Directory doesn't exist if no objects found (except for root)
+	if !hasObjects && (name != "" && name != "/") {
 		return nil, &os.PathError{
 			Op:   "stat",
 			Path: name,
 			Err:  os.ErrNotExist,
 		}
 	}
-	return NewFileInfo(path.Base(name), true, totalSize, time.Unix(0, 0)), nil
+
+	// For performance, we return 0 as size instead of calculating it
+	// The size is not critical for directory stat operations
+	return NewFileInfo(path.Base(name), true, 0, time.Unix(0, 0)), nil
 }
 
 // Chmod doesn't exists in S3 but could be implemented by analyzing ACLs
@@ -620,9 +654,17 @@ func (Fs) Chtimes(string, time.Time, time.Time) error {
 	return ErrNotSupported
 }
 
-// ListDirectory is an optimized method to list all objects in a directory at once
+// ListDirectory is an optimized method to list objects in a directory with limit support
 // using the S3 paginator, which is much more efficient than Readdir(-1) for large directories.
-func (fw *FsWrapper) ListDirectory(name string) ([]os.FileInfo, error) {
+// Parameters:
+//   - name: directory path
+//   - limit: maximum number of items to return (0 for default, -1 for no limit)
+func (fw *FsWrapper) ListDirectory(name string, limit int) ([]os.FileInfo, error) {
+	infos, _, err := fw.listDirectoryInternal(name, limit, "")
+	return infos, err
+}
+
+func (fw *FsWrapper) listDirectoryInternal(name string, limit int, marker string) ([]os.FileInfo, string, error) {
 	// Normalize the name first
 	name = normalizeName(name)
 
@@ -636,66 +678,104 @@ func (fw *FsWrapper) ListDirectory(name string) ([]os.FileInfo, error) {
 	// Ensure prefix doesn't start with / for S3
 	prefixWithRoot = strings.TrimPrefix(prefixWithRoot, "/")
 
+	// Create cache key
+	cacheKey := fmt.Sprintf("%s:%s:%s:%d:%s", fw.Bucket, prefixWithRoot, marker, limit, fw.RootPrefix)
+
+	// Try to get from cache first (cache for 30 seconds)
+	// Cache for any limit to improve performance for repeated requests
+	if cached, found := fw.Fs.getCachedDirectory(cacheKey, 30*time.Second); found {
+		return cached, marker, nil
+	}
+
 	var fileInfos []os.FileInfo
 	seen := make(map[string]bool)
 	dirModTime := make(map[string]time.Time)
 
-	// Use paginator to efficiently fetch all objects in batches
-	paginator := s3.NewListObjectsV2Paginator(fw.Fs.s3API, &s3.ListObjectsV2Input{
-		Bucket: aws.String(fw.Bucket),
-		Prefix: aws.String(prefixWithRoot),
-	})
+	// Set default limit if not specified
+	if limit == 0 {
+		limit = 1000 // Reasonable default for UI display
+	}
 
-	for paginator.HasMorePages() {
+	// Create list input with pagination support
+	listInput := &s3.ListObjectsV2Input{
+		Bucket:            aws.String(fw.Bucket),
+		Prefix:            aws.String(prefixWithRoot),
+		ContinuationToken: aws.String(marker),
+	}
+
+	// Apply limit if specified and positive
+	if limit > 0 {
+		listInput.MaxKeys = aws.Int32(int32(limit * 2)) // Get extra for deduplication
+	}
+
+	// Use paginator to efficiently fetch objects in batches
+	paginator := s3.NewListObjectsV2Paginator(fw.Fs.s3API, listInput)
+
+	var nextMarker string
+	var itemsProcessed int
+
+	for paginator.HasMorePages() && (limit < 0 || itemsProcessed < limit) {
 		page, err := paginator.NextPage(context.Background())
 		if err != nil {
-			return nil, err
+			return nil, "", err
+		}
+
+		// Save continuation token for next page
+		if page.NextContinuationToken != nil {
+			nextMarker = *page.NextContinuationToken
 		}
 
 		for _, obj := range page.Contents {
 			key := *obj.Key
 
-			// Skip the directory placeholder object itself
-			if key == prefixWithRoot {
+			if key == prefixWithRoot || !strings.HasPrefix(key, prefixWithRoot) {
 				continue
 			}
 
-			// Only process objects that start with our prefix
-			if !strings.HasPrefix(key, prefixWithRoot) {
-				continue
-			}
-
-			// Extract the relative path from the prefix
 			rel := strings.TrimPrefix(key, prefixWithRoot)
-			rel = strings.TrimPrefix(rel, "/")
+			if len(rel) > 0 && rel[0] == '/' {
+				rel = rel[1:]
+			}
 
-			// If rel contains a slash, it's a subdirectory
 			if idx := strings.Index(rel, "/"); idx != -1 {
 				dirName := rel[:idx]
 
-				// Update the directory's modification time if this file is more recent
 				if modTime, exists := dirModTime[dirName]; !exists || obj.LastModified.After(modTime) {
 					dirModTime[dirName] = *obj.LastModified
 				}
 
 				if !seen[dirName] {
 					seen[dirName] = true
-					// Use the latest modification time for this directory
 					latestModTime, hasModTime := dirModTime[dirName]
 					if !hasModTime {
 						latestModTime = time.Unix(0, 0)
 					}
 					fileInfos = append(fileInfos, NewFileInfo(dirName, true, 0, latestModTime))
+					itemsProcessed++
 				}
 				continue
 			}
 
-			// Regular file
 			fileInfos = append(fileInfos, NewFileInfo(path.Base(key), false, *obj.Size, *obj.LastModified))
+			itemsProcessed++
+
+			// Stop if we've reached the limit
+			if limit > 0 && itemsProcessed >= limit {
+				break
+			}
 		}
 	}
 
-	return fileInfos, nil
+	// Cache the result
+	fw.Fs.setCachedDirectory(cacheKey, fileInfos)
+
+	return fileInfos, nextMarker, nil
+}
+
+// ListDirectorySimple provides backward compatibility with the old signature
+func (fw *FsWrapper) ListDirectorySimple(name string) ([]os.FileInfo, error) {
+	infos, _, err := fw.listDirectoryInternal(name, -1, "")
+	return infos, err
 }
 
 // prependRootPrefix adds the RootPrefix to the given name if RootPrefix is set
@@ -704,16 +784,12 @@ func prependRootPrefix(name, rootPrefix string) string {
 		return name
 	}
 
-	// Clean the name first to handle leading slashes
 	nameClean := cleanS3Key(name)
-
-	// If name is empty after cleaning, return just the RootPrefix
 	if nameClean == "" {
 		return rootPrefix
 	}
 
-	// Join RootPrefix and name with a separator if needed
-	if !strings.HasSuffix(rootPrefix, "/") && !strings.HasPrefix(nameClean, "/") {
+	if len(rootPrefix) > 0 && rootPrefix[len(rootPrefix)-1] != '/' && len(nameClean) > 0 && nameClean[0] != '/' {
 		return rootPrefix + "/" + nameClean
 	}
 
@@ -722,26 +798,13 @@ func prependRootPrefix(name, rootPrefix string) string {
 
 // cleanS3Key removes the leading slash from the name to create a proper S3 key
 func cleanS3Key(name string) string {
-	// Remove leading slash(es)
-	for len(name) > 0 && name[0] == '/' {
-		name = name[1:]
-	}
-
-	// Handle the special case where the path is just "/" - return it as is
-	// but this should be very rare in normal operations. Most S3 operations don't
-	// work with an empty key, so we need to be careful
-	if name == "" {
-		// For the root directory, return a safe default or handle as needed
-		// In most cases, operations shouldn't reach here for root "/"
-		return "" // This will cause S3 operations to fail, which is safer than creating invalid objects
-	}
-
+	name = strings.TrimLeft(name, "/")
 	return name
 }
 
-// I couldn't find a way to make this code cleaner. It's basically a big copy-paste on two
-// very similar structures.
-func applyFileCreateProps(req *s3.PutObjectInput, p *UploadedFileProperties) {
+// applyFileProps applies the properties from UploadedFileProperties to the PutObjectInput.
+// This is used for both Create and Write operations.
+func applyFileProps(req *s3.PutObjectInput, p *UploadedFileProperties) {
 	if p.ACL != nil {
 		req.ACL = types.ObjectCannedACL(*p.ACL)
 	}
@@ -755,18 +818,16 @@ func applyFileCreateProps(req *s3.PutObjectInput, p *UploadedFileProperties) {
 	}
 }
 
+// Deprecated: use applyFileProps instead.
+// Kept for backward compatibility.
+func applyFileCreateProps(req *s3.PutObjectInput, p *UploadedFileProperties) {
+	applyFileProps(req, p)
+}
+
+// Deprecated: use applyFileProps instead.
+// Kept for backward compatibility.
 func applyFileWriteProps(req *s3.PutObjectInput, p *UploadedFileProperties) {
-	if p.ACL != nil {
-		req.ACL = types.ObjectCannedACL(*p.ACL)
-	}
-
-	if p.CacheControl != nil {
-		req.CacheControl = p.CacheControl
-	}
-
-	if p.ContentType != nil {
-		req.ContentType = p.ContentType
-	}
+	applyFileProps(req, p)
 }
 
 // normalizeName normalizes file and directory names to handle special cases like "\\U1单词卡片2(1).pdf"
@@ -847,4 +908,62 @@ func (fs *Fs) CompleteMultipartUpload(key, uploadID, bucket, rootPrefix string, 
 
 	_, err := fs.s3API.CompleteMultipartUpload(context.Background(), input)
 	return err
+}
+
+// getCachedDirectory retrieves directory listing from cache if available and not expired
+func (fs *Fs) getCachedDirectory(cacheKey string, maxAge time.Duration) ([]os.FileInfo, bool) {
+	fs.dirCacheMutex.RLock()
+	defer fs.dirCacheMutex.RUnlock()
+
+	if entry, exists := fs.dirCache[cacheKey]; exists {
+		if time.Since(entry.timestamp) <= maxAge {
+			// Return a copy to avoid modification
+			copy := make([]os.FileInfo, len(entry.fileInfos))
+			for i, info := range entry.fileInfos {
+				copy[i] = info
+			}
+			return copy, true
+		}
+	}
+	return nil, false
+}
+
+// setCachedDirectory stores directory listing in cache
+func (fs *Fs) setCachedDirectory(cacheKey string, fileInfos []os.FileInfo) {
+	fs.dirCacheMutex.Lock()
+	defer fs.dirCacheMutex.Unlock()
+
+	// Create a copy to store in cache
+	copy := make([]os.FileInfo, len(fileInfos))
+	for i, info := range fileInfos {
+		copy[i] = info
+	}
+
+	fs.dirCache[cacheKey] = &directoryCacheEntry{
+		fileInfos: copy,
+		timestamp: time.Now(),
+	}
+
+	// Simple cache eviction: keep cache size manageable
+	if len(fs.dirCache) > 100 {
+		// Remove oldest entries
+		for key, entry := range fs.dirCache {
+			if time.Since(entry.timestamp) > 5*time.Minute {
+				delete(fs.dirCache, key)
+			}
+		}
+	}
+}
+
+// invalidateDirectoryCache removes directory from cache (e.g., after file operations)
+func (fs *Fs) invalidateDirectoryCache(prefix string) {
+	fs.dirCacheMutex.Lock()
+	defer fs.dirCacheMutex.Unlock()
+
+	// Invalidate all cache entries that start with the given prefix
+	for key := range fs.dirCache {
+		if strings.HasPrefix(key, prefix) {
+			delete(fs.dirCache, key)
+		}
+	}
 }

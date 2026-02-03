@@ -1,4 +1,4 @@
-// Package s3 brings S3 files handling to afero
+// Package s3 implements an S3 filesystem using afero
 package s3
 
 import (
