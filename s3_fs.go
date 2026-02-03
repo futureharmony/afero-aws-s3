@@ -620,6 +620,84 @@ func (Fs) Chtimes(string, time.Time, time.Time) error {
 	return ErrNotSupported
 }
 
+// ListDirectory is an optimized method to list all objects in a directory at once
+// using the S3 paginator, which is much more efficient than Readdir(-1) for large directories.
+func (fw *FsWrapper) ListDirectory(name string) ([]os.FileInfo, error) {
+	// Normalize the name first
+	name = normalizeName(name)
+
+	cleanName := strings.TrimPrefix(name, "/")
+	if cleanName != "" && !strings.HasSuffix(cleanName, "/") {
+		cleanName += "/"
+	}
+
+	// Apply RootPrefix to the directory lookup
+	prefixWithRoot := prependRootPrefix(cleanName, fw.RootPrefix)
+	// Ensure prefix doesn't start with / for S3
+	prefixWithRoot = strings.TrimPrefix(prefixWithRoot, "/")
+
+	var fileInfos []os.FileInfo
+	seen := make(map[string]bool)
+	dirModTime := make(map[string]time.Time)
+
+	// Use paginator to efficiently fetch all objects in batches
+	paginator := s3.NewListObjectsV2Paginator(fw.Fs.s3API, &s3.ListObjectsV2Input{
+		Bucket: aws.String(fw.Bucket),
+		Prefix: aws.String(prefixWithRoot),
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(context.Background())
+		if err != nil {
+			return nil, err
+		}
+
+		for _, obj := range page.Contents {
+			key := *obj.Key
+
+			// Skip the directory placeholder object itself
+			if key == prefixWithRoot {
+				continue
+			}
+
+			// Only process objects that start with our prefix
+			if !strings.HasPrefix(key, prefixWithRoot) {
+				continue
+			}
+
+			// Extract the relative path from the prefix
+			rel := strings.TrimPrefix(key, prefixWithRoot)
+			rel = strings.TrimPrefix(rel, "/")
+
+			// If rel contains a slash, it's a subdirectory
+			if idx := strings.Index(rel, "/"); idx != -1 {
+				dirName := rel[:idx]
+
+				// Update the directory's modification time if this file is more recent
+				if modTime, exists := dirModTime[dirName]; !exists || obj.LastModified.After(modTime) {
+					dirModTime[dirName] = *obj.LastModified
+				}
+
+				if !seen[dirName] {
+					seen[dirName] = true
+					// Use the latest modification time for this directory
+					latestModTime, hasModTime := dirModTime[dirName]
+					if !hasModTime {
+						latestModTime = time.Unix(0, 0)
+					}
+					fileInfos = append(fileInfos, NewFileInfo(dirName, true, 0, latestModTime))
+				}
+				continue
+			}
+
+			// Regular file
+			fileInfos = append(fileInfos, NewFileInfo(path.Base(key), false, *obj.Size, *obj.LastModified))
+		}
+	}
+
+	return fileInfos, nil
+}
+
 // prependRootPrefix adds the RootPrefix to the given name if RootPrefix is set
 func prependRootPrefix(name, rootPrefix string) string {
 	if rootPrefix == "" {
