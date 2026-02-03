@@ -200,13 +200,11 @@ func (fs *Fs) ListBuckets() ([]string, error) {
 
 // Create a file.
 func (fs Fs) Create(name, bucket, rootPrefix string) (afero.File, error) {
-	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
-	name = normalizeName(name)
 	keyWithPrefix := prependRootPrefix(name, rootPrefix)
 	{ // It's faster to trigger an explicit empty put object than opening a file for write, closing it and re-opening it
 		req := &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
-			Key:    aws.String(cleanS3Key(keyWithPrefix)),
+			Key:    aws.String(keyWithPrefix),
 			Body:   bytes.NewReader([]byte{}),
 		}
 
@@ -240,9 +238,6 @@ func (fs Fs) Create(name, bucket, rootPrefix string) (afero.File, error) {
 
 // Mkdir makes a directory in S3.
 func (fs Fs) Mkdir(name string, perm os.FileMode, bucket, rootPrefix string) error {
-	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
-	name = normalizeName(name)
-
 	// Root directory "/" doesn't need to be created in S3 as it's virtual
 	if name == "/" || name == "." || name == "" {
 		return nil
@@ -268,8 +263,6 @@ func (fs *Fs) Open(name, bucket, rootPrefix string) (afero.File, error) {
 
 // OpenFile opens a file.
 func (fs *Fs) OpenFile(name string, flag int, _ os.FileMode, bucket, rootPrefix string) (afero.File, error) {
-	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
-	name = normalizeName(name)
 	file := NewFileWithBucketAndPrefix(fs, name, bucket, rootPrefix)
 
 	// Reading and writing is technically supported but can't lead to anything that makes sense
@@ -311,8 +304,6 @@ func (fs *Fs) OpenFile(name string, flag int, _ os.FileMode, bucket, rootPrefix 
 
 // Remove a file
 func (fs Fs) Remove(name, bucket, rootPrefix string) error {
-	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
-	name = normalizeName(name)
 	if _, err := fs.Stat(name, bucket, rootPrefix); err != nil {
 		return err
 	}
@@ -329,12 +320,10 @@ func (fs Fs) Remove(name, bucket, rootPrefix string) error {
 
 // forceRemove doesn't error if a file does not exist.
 func (fs Fs) forceRemove(name, bucket, rootPrefix string) error {
-	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
-	name = normalizeName(name)
 	keyWithPrefix := prependRootPrefix(name, rootPrefix)
 	_, err := fs.s3API.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
-		Key:    aws.String(cleanS3Key(keyWithPrefix)),
+		Key:    aws.String(keyWithPrefix),
 	})
 	return err
 }
@@ -343,8 +332,6 @@ func (fs Fs) forceRemove(name, bucket, rootPrefix string) error {
 // It is much more efficient and reliable on S3 than recursive Readdir + per-file deletes.
 func (fs *Fs) RemoveAll(name, bucket, rootPrefix string) error {
 	ctx := context.Background()
-	// normalize path first to handle cases like "\\U1单词卡片2(1).pdf"
-	name = normalizeName(name)
 	clean := name
 	if clean == "/" || clean == "." || clean == "" {
 		// skip root
@@ -481,9 +468,6 @@ func (fs *Fs) deleteObjectsBatch(ctx context.Context, bucket string, objs []type
 // will copy the file to an object with the new name and then delete
 // the original.
 func (fs Fs) Rename(oldname, newname, bucket, rootPrefix string) error {
-	// Normalize names first to handle cases like "\\U1单词卡片2(1).pdf"
-	oldname = normalizeName(oldname)
-	newname = normalizeName(newname)
 	if oldname == newname {
 		return nil
 	}
@@ -507,15 +491,15 @@ func (fs Fs) Rename(oldname, newname, bucket, rootPrefix string) error {
 
 	_, err := fs.s3API.CopyObject(context.Background(), &s3.CopyObjectInput{
 		Bucket:     aws.String(bucket),
-		CopySource: aws.String(bucket + "/" + cleanS3Key(oldKeyWithPrefix)),
-		Key:        aws.String(cleanS3Key(newKeyWithPrefix)),
+		CopySource: aws.String(bucket + "/" + oldKeyWithPrefix),
+		Key:        aws.String(newKeyWithPrefix),
 	})
 	if err != nil {
 		return err
 	}
 	_, err = fs.s3API.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
-		Key:    aws.String(cleanS3Key(oldKeyWithPrefix)),
+		Key:    aws.String(oldKeyWithPrefix),
 	})
 	return err
 }
@@ -523,8 +507,6 @@ func (fs Fs) Rename(oldname, newname, bucket, rootPrefix string) error {
 // Stat returns a FileInfo describing the named file.
 // If there is an error, it will be of type *os.PathError.
 func (fs Fs) Stat(name, bucket, rootPrefix string) (os.FileInfo, error) {
-	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
-	name = normalizeName(name)
 	if name == "/" || name == "" {
 		// The root always exists
 		// return NewFileInfo("/", true, 0, time.Unix(0, 0)), nil
@@ -534,7 +516,7 @@ func (fs Fs) Stat(name, bucket, rootPrefix string) (os.FileInfo, error) {
 	keyWithPrefix := prependRootPrefix(name, rootPrefix)
 	out, err := fs.s3API.HeadObject(context.Background(), &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
-		Key:    aws.String(cleanS3Key(keyWithPrefix)),
+		Key:    aws.String(keyWithPrefix),
 	})
 	if err != nil {
 		var apiErr smithy.APIError
@@ -618,8 +600,6 @@ func (fs Fs) statDirectory(name, bucket, rootPrefix string) (os.FileInfo, error)
 
 // Chmod doesn't exists in S3 but could be implemented by analyzing ACLs
 func (fs Fs) Chmod(name string, mode os.FileMode, bucket, rootPrefix string) error {
-	// Normalize the name first to handle cases like "\\U1单词卡片2(1).pdf"
-	name = normalizeName(name)
 	keyWithPrefix := prependRootPrefix(name, rootPrefix)
 	var acl string
 
@@ -637,7 +617,7 @@ func (fs Fs) Chmod(name string, mode os.FileMode, bucket, rootPrefix string) err
 
 	_, err := fs.s3API.PutObjectAcl(context.Background(), &s3.PutObjectAclInput{
 		Bucket: aws.String(bucket),
-		Key:    aws.String(cleanS3Key(keyWithPrefix)),
+		Key:    aws.String(keyWithPrefix),
 		ACL:    types.ObjectCannedACL(acl),
 	})
 	return err
@@ -666,8 +646,6 @@ func (fw *FsWrapper) ListDirectory(name string, limit int) ([]os.FileInfo, error
 
 func (fw *FsWrapper) listDirectoryInternal(name string, limit int, marker string) ([]os.FileInfo, string, error) {
 	// Normalize the name first
-	name = normalizeName(name)
-
 	cleanName := strings.TrimPrefix(name, "/")
 	if cleanName != "" && !strings.HasSuffix(cleanName, "/") {
 		cleanName += "/"
@@ -781,26 +759,37 @@ func (fw *FsWrapper) ListDirectorySimple(name string) ([]os.FileInfo, error) {
 // prependRootPrefix adds the RootPrefix to the given name if RootPrefix is set
 func prependRootPrefix(name, rootPrefix string) string {
 	if rootPrefix == "" {
-		return name
+		return strings.TrimLeft(name, "/")
 	}
 
-	nameClean := cleanS3Key(name)
-	if nameClean == "" {
-		return rootPrefix
+	if name == "" {
+		return strings.TrimLeft(strings.TrimRight(rootPrefix, "/"), "/")
 	}
 
-	if len(rootPrefix) > 0 && rootPrefix[len(rootPrefix)-1] != '/' && len(nameClean) > 0 && nameClean[0] != '/' {
-		return rootPrefix + "/" + nameClean
-	}
+	rp := strings.TrimRight(rootPrefix, "/")
+	n := strings.TrimLeft(name, "/")
 
-	return rootPrefix + nameClean
+	result := rp + "/" + n
+	return strings.TrimLeft(result, "/")
 }
 
-// cleanS3Key removes the leading slash from the name to create a proper S3 key
-func cleanS3Key(name string) string {
-	name = strings.TrimLeft(name, "/")
-	return name
-}
+// // prependRootPrefix adds the RootPrefix to the given name if RootPrefix is set
+// func prependRootPrefix(name, rootPrefix string) string {
+// 	if rootPrefix == "" {
+// 		return name
+// 	}
+
+// 	nameClean := name
+// 	if nameClean == "" {
+// 		return rootPrefix
+// 	}
+
+// 	if len(rootPrefix) > 0 && rootPrefix[len(rootPrefix)-1] != '/' && len(nameClean) > 0 && nameClean[0] != '/' {
+// 		return rootPrefix + "/" + nameClean
+// 	}
+
+// 	return rootPrefix + nameClean
+// }
 
 // applyFileProps applies the properties from UploadedFileProperties to the PutObjectInput.
 // This is used for both Create and Write operations.
@@ -830,33 +819,6 @@ func applyFileWriteProps(req *s3.PutObjectInput, p *UploadedFileProperties) {
 	applyFileProps(req, p)
 }
 
-// normalizeName normalizes file and directory names to handle special cases like "\\U1单词卡片2(1).pdf"
-func normalizeName(name string) string {
-	// Check if the original name has a trailing slash to preserve
-	hasTrailingSlash := strings.HasSuffix(name, "/") || strings.HasSuffix(name, string(filepath.Separator))
-
-	// TODO
-	// // First, decode any URL-encoded characters to handle spaces and special chars
-	// if strings.Contains(name, "%") {
-	// 	if decoded, err := url.QueryUnescape(name); err == nil {
-	// 		name = decoded
-	// 	}
-	// }
-
-	// Then, clean the path to handle .. and . components
-	name = path.Clean(name)
-	// Convert any Windows-style backslashes to forward slashes (S3 standard)
-	name = filepath.ToSlash(name)
-
-	// Restore trailing slash if it was present in the original name
-	if hasTrailingSlash && !strings.HasSuffix(name, "/") {
-		name += "/"
-	}
-
-	// Additional processing for special cases can be added here as needed
-	return name
-}
-
 // S3 multipart upload helper functions
 
 // InitiateMultipartUpload initiates a multipart upload for the given key
@@ -864,7 +826,7 @@ func (fs *Fs) InitiateMultipartUpload(key, bucket, rootPrefix string) (string, e
 	keyWithPrefix := prependRootPrefix(key, rootPrefix)
 	input := &s3.CreateMultipartUploadInput{
 		Bucket: aws.String(bucket),
-		Key:    aws.String(cleanS3Key(keyWithPrefix)),
+		Key:    aws.String(keyWithPrefix),
 	}
 
 	result, err := fs.s3API.CreateMultipartUpload(context.Background(), input)
@@ -880,7 +842,7 @@ func (fs *Fs) UploadPart(key, uploadID, bucket, rootPrefix string, partNumber in
 	keyWithPrefix := prependRootPrefix(key, rootPrefix)
 	input := &s3.UploadPartInput{
 		Bucket:     aws.String(bucket),
-		Key:        aws.String(cleanS3Key(keyWithPrefix)),
+		Key:        aws.String(keyWithPrefix),
 		UploadId:   aws.String(uploadID),
 		PartNumber: aws.Int32(partNumber),
 		Body:       bytes.NewReader(data),
@@ -907,7 +869,7 @@ func (fs *Fs) CompleteMultipartUpload(key, uploadID, bucket, rootPrefix string, 
 
 	input := &s3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(bucket),
-		Key:      aws.String(cleanS3Key(keyWithPrefix)),
+		Key:      aws.String(keyWithPrefix),
 		UploadId: aws.String(uploadID),
 		MultipartUpload: &types.CompletedMultipartUpload{
 			Parts: completedParts,

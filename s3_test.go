@@ -745,7 +745,7 @@ func TestContentType(t *testing.T) {
 		for fileName, mimeType := range fileToMime {
 			resp, err := fs.Fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 				Bucket: aws.String(fs.Fs.bucket),
-				Key:    aws.String(cleanS3Key(fileName)),
+				Key:    aws.String(fileName),
 			})
 			req.NoError(err)
 			req.Equal(mimeType, *resp.ContentType)
@@ -758,7 +758,7 @@ func TestContentType(t *testing.T) {
 
 		resp, err := fs.Fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 			Bucket: aws.String(fs.Fs.bucket),
-			Key:    aws.String(cleanS3Key("create.png")),
+			Key:    aws.String("create.png"),
 		})
 		req.NoError(err)
 		req.Equal("image/png", *resp.ContentType)
@@ -775,7 +775,7 @@ func TestContentType(t *testing.T) {
 		for _, name := range []string{"custom-create", "custom-write"} {
 			resp, err := fs.Fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 				Bucket: aws.String(fs.Fs.bucket),
-				Key:    aws.String(cleanS3Key(name)),
+				Key:    aws.String(name),
 			})
 			req.NoError(err)
 			req.Equal("my-type", *resp.ContentType)
@@ -804,7 +804,7 @@ func TestFileProps(t *testing.T) {
 		for _, name := range []string{"create", "write"} {
 			resp, err := fs.Fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 				Bucket: aws.String(fs.Fs.bucket),
-				Key:    aws.String(cleanS3Key(name)),
+				Key:    aws.String(name),
 			})
 			req.NoError(err)
 			req.Equal(cacheControl, *resp.CacheControl)

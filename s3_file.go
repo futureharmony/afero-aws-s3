@@ -418,7 +418,7 @@ func (f *File) openWriteStream() error {
 		keyWithPrefix := prependRootPrefix(f.name, f.rootPrefix)
 		input := &s3.PutObjectInput{
 			Bucket: aws.String(f.bucket),
-			Key:    aws.String(cleanS3Key(keyWithPrefix)),
+			Key:    aws.String(keyWithPrefix),
 			Body:   reader,
 		}
 
@@ -459,7 +459,7 @@ func (f *File) openReadStream(startAt int64) error {
 	keyWithPrefix := prependRootPrefix(f.name, f.rootPrefix)
 	resp, err := f.fs.s3API.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: aws.String(f.bucket),
-		Key:    aws.String(cleanS3Key(keyWithPrefix)),
+		Key:    aws.String(keyWithPrefix),
 		Range:  streamRange,
 	})
 	if err != nil {
