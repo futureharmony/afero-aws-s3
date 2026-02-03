@@ -773,23 +773,30 @@ func prependRootPrefix(name, rootPrefix string) string {
 	return strings.TrimLeft(result, "/")
 }
 
-// // prependRootPrefix adds the RootPrefix to the given name if RootPrefix is set
-// func prependRootPrefix(name, rootPrefix string) string {
-// 	if rootPrefix == "" {
-// 		return name
-// 	}
+// GetDiskUsage calculates the total size of all objects under the given prefix.
+// This method uses pagination to efficiently handle large directories.
+func (fs *Fs) GetDiskUsage(bucket, prefix string) (int64, error) {
+	ctx := context.Background()
+	var totalSize int64
 
-// 	nameClean := name
-// 	if nameClean == "" {
-// 		return rootPrefix
-// 	}
+	paginator := s3.NewListObjectsV2Paginator(fs.s3API, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(prefix),
+	})
 
-// 	if len(rootPrefix) > 0 && rootPrefix[len(rootPrefix)-1] != '/' && len(nameClean) > 0 && nameClean[0] != '/' {
-// 		return rootPrefix + "/" + nameClean
-// 	}
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return 0, err
+		}
 
-// 	return rootPrefix + nameClean
-// }
+		for _, obj := range page.Contents {
+			totalSize += *obj.Size
+		}
+	}
+
+	return totalSize, nil
+}
 
 // applyFileProps applies the properties from UploadedFileProperties to the PutObjectInput.
 // This is used for both Create and Write operations.
