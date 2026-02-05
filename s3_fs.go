@@ -17,7 +17,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/aws/smithy-go"
 	"github.com/spf13/afero"
 )
 
@@ -242,8 +241,11 @@ func (fs Fs) Mkdir(name string, perm os.FileMode, bucket, rootPrefix string) err
 	if name == "/" || name == "." || name == "" {
 		return nil
 	}
+	if !strings.HasSuffix(name, "/") {
+		name = fmt.Sprintf("%s/", name)
+	}
 
-	file, err := fs.OpenFile(fmt.Sprintf("%s/", name), os.O_CREATE, perm, bucket, rootPrefix)
+	file, err := fs.OpenFile(name, os.O_CREATE, perm, bucket, rootPrefix)
 	// file, err := fs.OpenFile(path.Clean(name), os.O_CREATE, perm, bucket, rootPrefix)
 	if err == nil {
 		err = file.Close()
@@ -509,48 +511,38 @@ func (fs Fs) Rename(oldname, newname, bucket, rootPrefix string) error {
 func (fs Fs) Stat(name, bucket, rootPrefix string) (os.FileInfo, error) {
 	if name == "/" || name == "" {
 		// The root always exists
-		// return NewFileInfo("/", true, 0, time.Unix(0, 0)), nil
 		statDir, errStat := fs.statDirectory(name, bucket, rootPrefix)
 		return statDir, errStat
 	}
-	keyWithPrefix := prependRootPrefix(name, rootPrefix)
-	out, err := fs.s3API.HeadObject(context.Background(), &s3.HeadObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(keyWithPrefix),
-	})
-	if err != nil {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
-			if strings.Contains(apiErr.ErrorCode(), "NotFound") || apiErr.ErrorCode() == "404" {
-				statDir, errStat := fs.statDirectory(name, bucket, rootPrefix)
-				return statDir, errStat
-			}
-		}
-		return FileInfo{}, &os.PathError{
-			Op:   "stat",
-			Path: name,
-			Err:  err,
-		}
-	} else if strings.HasSuffix(name, "/") {
-		// user asked for a directory, but this is a file
-		statDir, errStat := fs.statDirectory(name, bucket, rootPrefix)
-		return statDir, errStat
 
-		// return FileInfo{
-		// 	name:        name,
-		// 	directory:   true,
-		// 	modTime:     *out.LastModified,
-		// 	sizeInBytes: 0,
-		// }, nil
-		/*
-			return FileInfo{}, &os.PathError{
-				Op:   "stat",
-				Path: name,
-				Err:  os.ErrNotExist,
-			}
-		*/
+	keyWithPrefix := prependRootPrefix(name, rootPrefix)
+
+	// First, try to treat it as a file (object)
+	// Only use HeadObject for non-directory looking paths
+	if !strings.HasSuffix(name, "/") {
+		out, err := fs.s3API.HeadObject(context.Background(), &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(keyWithPrefix),
+		})
+		if err == nil {
+			// File exists
+			return NewFileInfo(path.Base(name), false, *out.ContentLength, *out.LastModified), nil
+		}
+		// For HeadObject errors, fall through to check if it's a directory
 	}
-	return NewFileInfo(path.Base(name), false, *out.ContentLength, *out.LastModified), nil
+
+	// Try as a directory
+	statDir, errStat := fs.statDirectory(name, bucket, rootPrefix)
+	if errStat == nil {
+		return statDir, nil
+	}
+
+	// If we get here, neither file nor directory exists
+	return FileInfo{}, &os.PathError{
+		Op:   "stat",
+		Path: name,
+		Err:  os.ErrNotExist,
+	}
 }
 
 func (fs Fs) statDirectory(name, bucket, rootPrefix string) (os.FileInfo, error) {
